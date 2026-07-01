@@ -1,0 +1,28 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  name: loops-map
+spec:
+  entrypoint: loop-map
+  templates:
+    - name: loop-map
+      steps:
+        - - name: process
+            template: echo
+            arguments:
+              parameters:
+                - name: fruit
+                  value: "{{item}}"
+            withItems:
+              - apple
+              - banana
+              - cherry
+
+    - name: echo
+      inputs:
+        parameters:
+          - name: fruit
+      container:
+        image: alpine
+        command: [echo]
+        args: ["processing {{inputs.parameters.fruit}}"]

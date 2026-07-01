@@ -1,0 +1,35 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  name: script-python
+spec:
+  entrypoint: gen-and-print
+  templates:
+    - name: gen-and-print
+      steps:
+        - - name: generate
+            template: gen-random
+        - - name: show
+            template: print-message
+            arguments:
+              parameters:
+                - name: message
+                  value: "random number was {{steps.generate.outputs.result}}"
+
+    - name: gen-random
+      script:
+        image: python:3.11-slim
+        command: [python]
+        source: |
+          import random
+          print(random.randint(1, 100))
+
+    - name: print-message
+      inputs:
+        parameters:
+          - name: message
+      script:
+        image: python:3.11-slim
+        command: [python]
+        source: |
+          print("message: {{inputs.parameters.message}}")

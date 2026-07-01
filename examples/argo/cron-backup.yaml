@@ -1,0 +1,25 @@
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: nightly-backup
+spec:
+  schedule: "0 2 * * *"
+  timezone: "America/New_York"
+  workflowSpec:
+    entrypoint: backup
+    arguments:
+      parameters:
+        - name: database_url
+          value: "postgres://user:pass@db:5432/app"
+    templates:
+      - name: backup
+        inputs:
+          parameters:
+            - name: database_url
+        container:
+          image: postgres:16
+          command: [sh, -c]
+          args: ["pg_dump \"$DB_URL\" > /backup/dump.sql && echo done"]
+          env:
+            - name: DB_URL
+              value: "{{inputs.parameters.database_url}}"

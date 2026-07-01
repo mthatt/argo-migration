@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "argo2prefect"
+version = "0.1.0"
+description = "Migrate Argo Workflows manifests to Prefect 3 Python flows."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Prefect Technologies, Inc." }]
+maintainers = [{ name = "mthatt" }]
+keywords = ["argo", "prefect", "workflows", "migration", "orchestration"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Systems Administration",
+    "Topic :: Software Development :: Code Generators",
+]
+dependencies = [
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+# Runtime deps for the *generated* flows (not required to run the converter).
+generated = [
+    "prefect>=3,<4",
+    "prefect-shell>=0.3",
+]
+
+[project.scripts]
+argo2prefect = "argo2prefect.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/mthatt/argo-migration"
+Repository = "https://github.com/mthatt/argo-migration"
+Issues = "https://github.com/mthatt/argo-migration/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
