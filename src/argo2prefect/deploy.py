@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Optional
 
 from .generator import DeploymentPlan
 
@@ -41,7 +40,7 @@ class DeployOptions:
 
     work_pool: str = "managed-pool"
     work_pool_type: str = MANAGED_POOL_TYPE
-    source_repo: Optional[str] = None
+    source_repo: str | None = None
     # The generator runtime, carried through only to warn when it cannot run on
     # the chosen work pool (e.g. docker/kubernetes work on Managed compute).
     runtime: str = "docker"
@@ -232,7 +231,7 @@ def render_deploy_md(plans: list[DeploymentPlan], opts: DeployOptions) -> str:
     # Runtime mismatch.
     if opts.runtime_needs_richer_pool:
         out += [
-            f"- [ ] **Runtime mismatch.** These flows were generated with `--runtime",
+            "- [ ] **Runtime mismatch.** These flows were generated with `--runtime",
             f"  {opts.runtime}`, which needs Docker/kubectl and will **not** run on the",
             "  default Managed pool. Switch to a matching pool (see above) before this",
             "  will actually execute.",

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,21 +7,21 @@ name = "argo2prefect"
 version = "0.1.0"
 description = "Migrate Argo Workflows manifests to Prefect 3 Python flows."
 readme = "README.md"
-requires-python = ">=3.9"
-license = { text = "MIT" }
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Prefect Technologies, Inc." }]
 maintainers = [{ name = "mthatt" }]
 keywords = ["argo", "prefect", "workflows", "migration", "orchestration"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: System :: Systems Administration",
     "Topic :: Software Development :: Code Generators",
 ]
@@ -32,6 +32,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "types-PyYAML",
 ]
 # Runtime deps for the *generated* flows (not required to run the converter).
 generated = [
@@ -53,3 +56,18 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["tests/golden", "examples/prefect"]
+
+[tool.ruff.lint]
+extend-select = ["I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src"]
+strict = false
+warn_unused_ignores = true
+check_untyped_defs = true

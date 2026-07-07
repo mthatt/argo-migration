@@ -13,7 +13,7 @@ the generator can flag them rather than crash.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 import yaml
 
@@ -71,8 +71,7 @@ def parse_workflows(yaml_text: str) -> list[Workflow]:
     if not workflows:
         detail = f" (skipped kinds: {', '.join(skipped)})" if skipped else ""
         raise ParseError(
-            "No Argo Workflow manifest found. Expected one of "
-            f"{sorted(WORKFLOW_KINDS)}{detail}."
+            f"No Argo Workflow manifest found. Expected one of {sorted(WORKFLOW_KINDS)}{detail}."
         )
     return workflows
 
@@ -84,8 +83,8 @@ def parse_workflow_dict(doc: dict[str, Any]) -> Workflow:
     spec = doc.get("spec") or {}
     warnings: list[str] = []
 
-    schedule: Optional[str] = None
-    timezone: Optional[str] = None
+    schedule: str | None = None
+    timezone: str | None = None
     if kind == "CronWorkflow":
         schedule = spec.get("schedule") or _first_schedule(spec.get("schedules"))
         timezone = spec.get("timezone")
@@ -123,7 +122,7 @@ def parse_workflow_dict(doc: dict[str, Any]) -> Workflow:
     return workflow
 
 
-def _spec_for_kind(kind: Optional[str], spec: dict[str, Any]) -> dict[str, Any]:
+def _spec_for_kind(kind: str | None, spec: dict[str, Any]) -> dict[str, Any]:
     """Return the spec that actually holds ``templates``/``entrypoint``.
 
     For ``CronWorkflow`` this is nested under ``workflowSpec``.
@@ -133,7 +132,7 @@ def _spec_for_kind(kind: Optional[str], spec: dict[str, Any]) -> dict[str, Any]:
     return spec
 
 
-def _first_schedule(schedules: Any) -> Optional[str]:
+def _first_schedule(schedules: Any) -> str | None:
     if isinstance(schedules, list) and schedules:
         return str(schedules[0])
     return None
@@ -166,9 +165,7 @@ def _parse_template(raw: dict[str, Any], warnings: list[str]) -> Template:
         template.script = _parse_script(raw["script"])
     elif "dag" in raw:
         template.kind = TemplateKind.DAG
-        template.dag_tasks = [
-            _parse_call(t) for t in (raw["dag"].get("tasks") or [])
-        ]
+        template.dag_tasks = [_parse_call(t) for t in (raw["dag"].get("tasks") or [])]
     elif "steps" in raw:
         template.kind = TemplateKind.STEPS
         template.step_groups = _parse_steps(raw["steps"])
@@ -290,7 +287,9 @@ def _parse_parameters(raw: Any) -> list[Parameter]:
             Parameter(
                 name=str(item["name"]),
                 value=None if value is None else _scalar_to_str(value),
-                default=None if item.get("default") is None else _scalar_to_str(item.get("default")),
+                default=None
+                if item.get("default") is None
+                else _scalar_to_str(item.get("default")),
             )
         )
     return params

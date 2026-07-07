@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 
 class TemplateKind(str, Enum):
@@ -47,8 +47,8 @@ class Parameter:
     """
 
     name: str
-    value: Optional[str] = None
-    default: Optional[str] = None
+    value: str | None = None
+    default: str | None = None
 
 
 @dataclass
@@ -57,8 +57,8 @@ class Artifact:
     so the generator can warn about manual follow-up."""
 
     name: str
-    path: Optional[str] = None
-    from_expression: Optional[str] = None
+    path: str | None = None
+    from_expression: str | None = None
 
 
 @dataclass
@@ -69,7 +69,7 @@ class ContainerSpec:
     command: list[str] = field(default_factory=list)
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
-    working_dir: Optional[str] = None
+    working_dir: str | None = None
 
 
 @dataclass
@@ -104,15 +104,15 @@ class HTTPSpec:
     method: str = "GET"
     url: str = ""
     headers: dict[str, str] = field(default_factory=dict)
-    body: Optional[str] = None
-    success_condition: Optional[str] = None
+    body: str | None = None
+    success_condition: str | None = None
 
 
 @dataclass
 class SuspendSpec:
     """A ``suspend`` template that pauses the workflow."""
 
-    duration: Optional[str] = None
+    duration: str | None = None
 
 
 @dataclass
@@ -128,11 +128,11 @@ class Call:
     template: str
     arguments: list[Parameter] = field(default_factory=list)
     dependencies: list[str] = field(default_factory=list)
-    when: Optional[str] = None
-    with_items: Optional[list[Any]] = None
-    with_param: Optional[str] = None
+    when: str | None = None
+    with_items: list[Any] | None = None
+    with_param: str | None = None
     # A step/task may invoke another workflow template instead of an inline one.
-    template_ref: Optional[str] = None
+    template_ref: str | None = None
 
 
 @dataclass
@@ -146,11 +146,11 @@ class Template:
     outputs: list[Parameter] = field(default_factory=list)
     output_artifacts: list[Artifact] = field(default_factory=list)
 
-    container: Optional[ContainerSpec] = None
-    script: Optional[ScriptSpec] = None
-    resource: Optional[ResourceSpec] = None
-    http: Optional[HTTPSpec] = None
-    suspend: Optional[SuspendSpec] = None
+    container: ContainerSpec | None = None
+    script: ScriptSpec | None = None
+    resource: ResourceSpec | None = None
+    http: HTTPSpec | None = None
+    suspend: SuspendSpec | None = None
 
     # For kind == DAG.
     dag_tasks: list[Call] = field(default_factory=list)
@@ -158,7 +158,7 @@ class Template:
     step_groups: list[list[Call]] = field(default_factory=list)
 
     # Retry / resource hints carried through for the generator.
-    retry_limit: Optional[int] = None
+    retry_limit: int | None = None
 
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -174,21 +174,21 @@ class Workflow:
 
     kind: str = "Workflow"
     name: str = "workflow"
-    generate_name: Optional[str] = None
-    namespace: Optional[str] = None
-    entrypoint: Optional[str] = None
+    generate_name: str | None = None
+    namespace: str | None = None
+    entrypoint: str | None = None
     arguments: list[Parameter] = field(default_factory=list)
     templates: list[Template] = field(default_factory=list)
 
     # Populated for CronWorkflow.
-    schedule: Optional[str] = None
-    timezone: Optional[str] = None
+    schedule: str | None = None
+    timezone: str | None = None
 
     labels: dict[str, str] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
 
-    def template_by_name(self, name: str) -> Optional[Template]:
+    def template_by_name(self, name: str) -> Template | None:
         for template in self.templates:
             if template.name == name:
                 return template

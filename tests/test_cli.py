@@ -21,9 +21,7 @@ def test_cli_inspect(capsys, examples_dir):
 
 def test_cli_convert_to_file(tmp_path, examples_dir):
     out_file = tmp_path / "flow.py"
-    rc = main(
-        ["convert", str(examples_dir / "steps-hello.yaml"), "-o", str(out_file), "-q"]
-    )
+    rc = main(["convert", str(examples_dir / "steps-hello.yaml"), "-o", str(out_file), "-q"])
     assert rc == 0
     assert out_file.exists()
     assert "def steps_hello_flow(" in out_file.read_text(encoding="utf-8")
@@ -75,9 +73,10 @@ def test_cli_emit_prefect_yaml(tmp_path, examples_dir):
     # The CronWorkflow keeps its schedule.
     assert deployments["nightly-backup"]["schedules"][0]["cron"] == "0 2 * * *"
     # git_clone pull step wired from --source-repo.
-    assert doc["pull"][0]["prefect.deployments.steps.git_clone"][
-        "repository"
-    ] == "https://github.com/acme/flows"
+    assert (
+        doc["pull"][0]["prefect.deployments.steps.git_clone"]["repository"]
+        == "https://github.com/acme/flows"
+    )
 
 
 def test_cli_emit_prefect_yaml_requires_file_output(examples_dir):

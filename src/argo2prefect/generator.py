@@ -20,7 +20,6 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Optional
 
 from .expressions import Scope, translate_condition, translate_value
 from .models import (
@@ -60,9 +59,7 @@ class GeneratorOptions:
 
     def __post_init__(self) -> None:
         if self.runtime not in ("shell", "docker", "kubernetes"):
-            raise ValueError(
-                f"Unknown runtime {self.runtime!r}; expected shell|docker|kubernetes."
-            )
+            raise ValueError(f"Unknown runtime {self.runtime!r}; expected shell|docker|kubernetes.")
 
 
 @dataclass
@@ -77,10 +74,10 @@ class DeploymentPlan:
 
     name: str
     flow_func: str
-    schedule: Optional[str] = None
-    timezone: Optional[str] = None
+    schedule: str | None = None
+    timezone: str | None = None
     parameters: dict[str, str] = field(default_factory=dict)
-    entrypoint_file: Optional[str] = None
+    entrypoint_file: str | None = None
 
 
 class _Code:
@@ -106,7 +103,7 @@ class _GenState:
     func_names: set[str] = field(default_factory=set)
     workflow_params: dict[str, str] = field(default_factory=dict)
 
-    def base_scope(self, inputs: Optional[dict[str, str]] = None) -> Scope:
+    def base_scope(self, inputs: dict[str, str] | None = None) -> Scope:
         return Scope(
             inputs=inputs or {},
             workflow_params=dict(self.workflow_params),
@@ -142,9 +139,7 @@ def generate_module(
             wp_defaults.setdefault(param.name, param.value or param.default or "")
         for name in sorted(_referenced_workflow_params(wf)):
             wp_defaults.setdefault(name, "")
-    gen.workflow_params = {
-        name: f"WORKFLOW_PARAMETERS[{_squote(name)}]" for name in wp_defaults
-    }
+    gen.workflow_params = {name: f"WORKFLOW_PARAMETERS[{_squote(name)}]" for name in wp_defaults}
 
     body = _Code()
     served: list[tuple[Workflow, str]] = []
@@ -313,18 +308,14 @@ def _emit_script_body(
     code.add("_fh.write(_script)", ind + 1)
     code.add("try:", ind)
     if runtime == "shell":
-        code.add(
-            f"_cmd = shlex.join([{json.dumps(interpreter)}, _path])", ind + 1
-        )
+        code.add(f"_cmd = shlex.join([{json.dumps(interpreter)}, _path])", ind + 1)
         code.add("_out = ShellOperation(commands=[_cmd], env=_env).run()", ind + 1)
     else:  # docker
         code.add('_parts = ["docker", "run", "--rm", "-i"]', ind + 1)
         code.add("for _k, _v in _env.items():", ind + 1)
         code.add('_parts += ["-e", f"{_k}={_v}"]', ind + 2)
         code.add(f"_parts += [{json.dumps(image)}, {json.dumps(interpreter)}]", ind + 1)
-        code.add(
-            '_cmd = shlex.join(_parts) + " < " + shlex.quote(_path)', ind + 1
-        )
+        code.add('_cmd = shlex.join(_parts) + " < " + shlex.quote(_path)', ind + 1)
         code.add("_out = ShellOperation(commands=[_cmd]).run()", ind + 1)
     code.add("finally:", ind)
     code.add("os.unlink(_path)", ind + 1)
@@ -362,7 +353,9 @@ def _emit_kubectl_job(
     code.add('"metadata": {"name": _job_name},', ind + 1)
     code.add('"spec": {', ind + 1)
     code.add('"backoffLimit": 0,', ind + 2)
-    code.add('"template": {"spec": {"restartPolicy": "Never", "containers": [_container]}},', ind + 2)
+    code.add(
+        '"template": {"spec": {"restartPolicy": "Never", "containers": [_container]}},', ind + 2
+    )
     code.add("},", ind + 1)
     code.add("}", ind)
     code.add('_fd, _path = tempfile.mkstemp(suffix=".json")', ind)
@@ -373,9 +366,7 @@ def _emit_kubectl_job(
     code.add('f"kubectl apply -f {_path}",', ind + 2)
     code.add('f"kubectl wait --for=condition=complete --timeout=1h job/{_job_name}",', ind + 2)
     code.add("]).run()", ind + 1)
-    code.add(
-        '_out = ShellOperation(commands=[f"kubectl logs job/{_job_name}"]).run()', ind + 1
-    )
+    code.add('_out = ShellOperation(commands=[f"kubectl logs job/{_job_name}"]).run()', ind + 1)
     code.add("finally:", ind)
     code.add("os.unlink(_path)", ind + 1)
 
@@ -398,7 +389,7 @@ def _emit_resource_body(
     code.add("_fh.write(_manifest)", ind + 1)
     code.add("try:", ind)
     code.add(
-        f"_out = ShellOperation(commands=[f\"kubectl {res.action} -f {{_path}}\"]).run()",
+        f'_out = ShellOperation(commands=[f"kubectl {res.action} -f {{_path}}"]).run()',
         ind + 1,
     )
     code.add("finally:", ind)
@@ -429,7 +420,9 @@ def _emit_suspend_body(code: _Code, ind: int, template: Template, gen: _GenState
     duration = template.suspend.duration if template.suspend else None
     seconds = _duration_to_seconds(duration)
     if seconds is None:
-        code.add("# TODO: indefinite suspend. Use prefect.flow_runs.pause_flow_run() if needed.", ind)
+        code.add(
+            "# TODO: indefinite suspend. Use prefect.flow_runs.pause_flow_run() if needed.", ind
+        )
         code.add("return None", ind)
     else:
         gen.imports.add("time")
@@ -469,9 +462,7 @@ def _emit_composite_flow(
         ordered = _topo_sort(template.dag_tasks)
         for call in ordered:
             prev = [
-                f"{sanitize_identifier(d)}_fut"
-                for d in call.dependencies
-                if d not in sync_calls
+                f"{sanitize_identifier(d)}_fut" for d in call.dependencies if d not in sync_calls
             ]
             _emit_call(code, 1, wf, call, scope, func_of, gen, prev, sync_calls)
     else:  # STEPS
@@ -491,9 +482,11 @@ def _emit_composite_flow(
 def _composite_sync_calls(wf: Workflow, template: Template) -> set[str]:
     """Names of calls whose target is itself composite (run inline, not submitted)."""
     sync: set[str] = set()
-    calls = template.dag_tasks if template.kind == TemplateKind.DAG else [
-        c for group in template.step_groups for c in group
-    ]
+    calls = (
+        template.dag_tasks
+        if template.kind == TemplateKind.DAG
+        else [c for group in template.step_groups for c in group]
+    )
     for call in calls:
         target = wf.template_by_name(call.template)
         if target is not None and target.is_composite:
@@ -541,7 +534,9 @@ def _emit_call(
 
     looped = call.with_items is not None or bool(call.with_param)
     if looped and not is_sync:
-        _emit_mapped_call(code, body_ind, call, target, target_func, scope, gen, wait_clause, fut_var)
+        _emit_mapped_call(
+            code, body_ind, call, target, target_func, scope, gen, wait_clause, fut_var
+        )
     elif is_sync:
         kwargs = _build_kwargs(call, target, scope, gen)
         if looped:
@@ -663,7 +658,7 @@ def _emit_main_flow(code: _Code, wf: Workflow, func_of: dict[str, str], gen: _Ge
     return main_name
 
 
-def _resolve_entrypoint(wf: Workflow, gen: _GenState) -> Optional[Template]:
+def _resolve_entrypoint(wf: Workflow, gen: _GenState) -> Template | None:
     if wf.entrypoint:
         target = wf.template_by_name(wf.entrypoint)
         if target is not None:
@@ -725,9 +720,7 @@ def _build_header(gen: _GenState, wp_defaults: dict[str, str], workflows: list[W
     code.add()
 
     stdlib = sorted(
-        name
-        for name in gen.imports
-        if name in {"json", "os", "shlex", "tempfile", "time", "uuid"}
+        name for name in gen.imports if name in {"json", "os", "shlex", "tempfile", "time", "uuid"}
     )
     for name in stdlib:
         code.add(f"import {name}")
@@ -804,9 +797,7 @@ def _emit_env_dict(code: _Code, ind: int, env_exprs: dict[str, str]) -> None:
 
 
 def _env_list(env_exprs: dict[str, str]) -> str:
-    return ", ".join(
-        f'{{"name": {json.dumps(k)}, "value": {v}}}' for k, v in env_exprs.items()
-    )
+    return ", ".join(f'{{"name": {json.dumps(k)}, "value": {v}}}' for k, v in env_exprs.items())
 
 
 def _comma(items: list[str]) -> str:
@@ -834,7 +825,7 @@ def _topo_sort(tasks: list) -> list:
     return ordered
 
 
-def _references_item(value: Optional[str]) -> bool:
+def _references_item(value: str | None) -> bool:
     return bool(value and _ITEM_REF.search(value))
 
 
@@ -843,7 +834,7 @@ def _referenced_workflow_params(wf: Workflow) -> set[str]:
     return set(_WF_PARAM_REF.findall(blob))
 
 
-def _duration_to_seconds(duration: Optional[str]) -> Optional[int]:
+def _duration_to_seconds(duration: str | None) -> int | None:
     if not duration:
         return None
     text = str(duration).strip()

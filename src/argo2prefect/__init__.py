@@ -29,7 +29,7 @@ __all__ = [
 __version__ = "0.1.0"
 
 
-def convert(yaml_text: str, options: "GeneratorOptions | None" = None) -> str:
+def convert(yaml_text: str, options: GeneratorOptions | None = None) -> str:
     """Parse Argo YAML and return generated Prefect Python source.
 
     This is a thin convenience wrapper over :func:`parse_workflows` followed by

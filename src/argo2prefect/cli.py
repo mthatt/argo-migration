@@ -24,7 +24,6 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Optional
 
 from . import __version__
 from .deploy import DeployOptions, render_deploy_md, render_prefect_yaml
@@ -34,7 +33,7 @@ from .parser import ParseError, parse_workflows
 YAML_SUFFIXES = {".yaml", ".yml"}
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     if not getattr(args, "command", None):

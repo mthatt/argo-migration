@@ -28,7 +28,7 @@ def test_generated_code_compiles(example_text, name, runtime):
 def test_dag_structure(example_text):
     code = convert(example_text("dag-diamond.yaml"))
     assert '@task(name="echo")' in code
-    assert 'def diamond(' in code
+    assert "def diamond(" in code
     assert "wait_for=" in code
     assert "WORKFLOW_PARAMETERS['greeting']" in code
     assert ".submit(" in code
@@ -76,9 +76,7 @@ def test_pep723_metadata_present_by_default(example_text):
 
 
 def test_pep723_metadata_can_be_disabled(example_text):
-    code = convert(
-        example_text("dag-diamond.yaml"), GeneratorOptions(script_metadata=False)
-    )
+    code = convert(example_text("dag-diamond.yaml"), GeneratorOptions(script_metadata=False))
     assert "# /// script" not in code
 
 

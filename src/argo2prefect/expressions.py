@@ -24,7 +24,6 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Optional
 
 from .naming import sanitize_identifier
 
@@ -40,7 +39,7 @@ class Scope:
     # Workflow-level parameter name -> local Python identifier (flow scope).
     workflow_params: dict[str, str] = field(default_factory=dict)
     # Loop variable name when inside a withItems/withParam expansion.
-    item_var: Optional[str] = None
+    item_var: str | None = None
     # Collected as a side effect: runtime imports needed (e.g. "flow_run").
     used_runtime: set[str] = field(default_factory=set)
     # Collected as a side effect: human-readable notes about unresolved bits.
@@ -115,7 +114,7 @@ def translate_condition(when: str, scope: Scope) -> str:
     return result.strip()
 
 
-def _resolve(token: str, scope: Scope, *, embedded: bool) -> Optional[str]:
+def _resolve(token: str, scope: Scope, *, embedded: bool) -> str | None:
     """Map a single ``{{ token }}`` body to a Python expression, or ``None``."""
     if token.startswith("inputs.parameters."):
         name = token[len("inputs.parameters.") :]
@@ -135,7 +134,7 @@ def _resolve(token: str, scope: Scope, *, embedded: bool) -> Optional[str]:
     if token == "item":
         return scope.item_var or "item"
     if token.startswith("item."):
-        return f"{scope.item_var or 'item'}['{token[len('item.'):]}']"
+        return f"{scope.item_var or 'item'}['{token[len('item.') :]}']"
     if token == "workflow.name":
         scope.used_runtime.add("flow_run")
         return "flow_run.name"
