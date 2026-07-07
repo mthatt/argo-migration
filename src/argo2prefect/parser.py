@@ -13,6 +13,7 @@ the generator can flag them rather than crash.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import yaml
@@ -91,6 +92,13 @@ def parse_workflow_dict(doc: dict[str, Any]) -> Workflow:
 
     work_spec = _spec_for_kind(kind, spec)
 
+    wt_ref = work_spec.get("workflowTemplateRef")
+    wt_ref_name: str | None = None
+    wt_ref_cluster = False
+    if isinstance(wt_ref, dict) and wt_ref.get("name"):
+        wt_ref_name = str(wt_ref["name"])
+        wt_ref_cluster = bool(wt_ref.get("clusterScope"))
+
     workflow = Workflow(
         kind=kind,
         name=str(metadata.get("name") or "").strip(),
@@ -101,6 +109,8 @@ def parse_workflow_dict(doc: dict[str, Any]) -> Workflow:
         templates=[_parse_template(t, warnings) for t in (work_spec.get("templates") or [])],
         schedule=schedule,
         timezone=timezone,
+        workflow_template_ref=wt_ref_name,
+        cluster_workflow_template_ref=wt_ref_cluster,
         labels={str(k): str(v) for k, v in (metadata.get("labels") or {}).items()},
         warnings=warnings,
         raw=doc,
@@ -252,6 +262,50 @@ def _parse_steps(raw_steps: Any) -> list[list[Call]]:
     return groups
 
 
+#: Status qualifiers allowed after a task name in a ``depends`` expression.
+_DEPENDS_STATUSES = {
+    "Succeeded",
+    "Failed",
+    "Errored",
+    "Skipped",
+    "Omitted",
+    "Daemoned",
+    "AnySucceeded",
+    "AllFailed",
+}
+
+_DEPENDS_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.\-]*")
+
+
+def depends_task_names(depends: str) -> list[str]:
+    """Extract the upstream task names referenced by a ``depends`` expression.
+
+    ``depends: "A && (B.Succeeded || C.Failed)"`` -> ``["A", "B", "C"]``.
+    Order of first appearance is preserved.
+    """
+    names: list[str] = []
+    for token in _DEPENDS_TOKEN.findall(depends):
+        name, _, qualifier = token.partition(".")
+        if qualifier and qualifier not in _DEPENDS_STATUSES:
+            # Dotted names that are not status qualifiers are kept whole.
+            name = token
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def depends_is_plain(depends: str) -> bool:
+    """True when ``depends`` means the same as ``dependencies``: all upstream
+    tasks succeeded (only ``&&``, no status qualifiers, no ``||``/``!``)."""
+    if "||" in depends or "!" in depends:
+        return False
+    stripped = re.sub(r"[()&\s]", " ", depends)
+    return all(
+        "." not in token or token.rpartition(".")[2] not in _DEPENDS_STATUSES
+        for token in stripped.split()
+    )
+
+
 def _parse_call(raw: dict[str, Any]) -> Call:
     template_ref = None
     ref = raw.get("templateRef")
@@ -262,15 +316,24 @@ def _parse_call(raw: dict[str, Any]) -> Call:
     if with_items is not None and not isinstance(with_items, list):
         with_items = [with_items]
 
+    dependencies = _str_list(raw.get("dependencies"))
+    depends = raw.get("depends")
+    if depends is not None:
+        depends = str(depends)
+        for name in depends_task_names(depends):
+            if name not in dependencies:
+                dependencies.append(name)
+
     return Call(
         name=str(raw.get("name", "step")),
         template=str(raw.get("template") or template_ref or ""),
         arguments=_parse_parameters((raw.get("arguments") or {}).get("parameters")),
-        dependencies=_str_list(raw.get("dependencies")),
+        dependencies=dependencies,
         when=raw.get("when"),
         with_items=with_items,
         with_param=raw.get("withParam"),
         template_ref=ref.get("name") if isinstance(ref, dict) else None,
+        depends=depends,
     )
 
 

@@ -101,7 +101,18 @@ Make the rebuild measurable before changing behavior.
 - Packaging hygiene: SPDX license expression, drop deprecated classifier,
   raise floor to Python 3.10, add dev tooling (ruff, mypy, types-PyYAML).
 
-### Phase 1 — Project loader + linker (biggest correctness win)
+### Phase 1 — Project loader + linker (biggest correctness win) ✅ complete
+
+> Status: directory conversion now loads all manifests as one linked project
+> (`argo2prefect.project`). `templateRef` resolves across files (and across
+> documents in one file), `workflowTemplateRef` inherits entrypoint +
+> arguments, and WorkflowTemplate/ClusterWorkflowTemplate manifests emit once
+> into `shared_templates.py`, imported by per-workflow modules. Pulled
+> forward from Phase 2: `depends` expressions now contribute dependency
+> edges (previously silently dropped); non-trivial gating is flagged with a
+> TODO. On the corpus converted as one project, every named templateRef
+> resolves (was 10 stubbed modules; the 3 remaining stubs are nameless
+> Argo `inline:` templates, a Phase 2 feature).
 
 - Replace file-at-a-time conversion with a **project model**: load all
   manifests in scope, build a registry of `WorkflowTemplate` /

@@ -19,10 +19,11 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .expressions import Scope, translate_condition, translate_value
 from .models import (
+    Call,
     ContainerSpec,
     ScriptSpec,
     Template,
@@ -30,6 +31,8 @@ from .models import (
     Workflow,
 )
 from .naming import sanitize_identifier, unique
+from .parser import depends_is_plain
+from .project import Project
 
 GENERATED_BY = "argo2prefect"
 
@@ -80,6 +83,45 @@ class DeploymentPlan:
     entrypoint_file: str | None = None
 
 
+SHARED_MODULE_NAME = "shared_templates"
+
+
+@dataclass
+class SharedModuleInfo:
+    """What workflow modules need to know about the shared-templates module.
+
+    Produced by :func:`generate_shared_module`; consumed by
+    :func:`generate_module` so per-workflow files can import and call the
+    functions generated for ``WorkflowTemplate`` / ``ClusterWorkflowTemplate``
+    manifests instead of stubbing ``templateRef`` call sites.
+    """
+
+    module_name: str = SHARED_MODULE_NAME
+    #: (library manifest name, template name) -> generated function name.
+    func_of: dict[tuple[str, str], str] = field(default_factory=dict)
+    #: Library manifest name -> its parsed Workflow (for input signatures).
+    manifests: dict[str, Workflow] = field(default_factory=dict)
+
+    def lookup(self, library: str, template: str) -> tuple[Template, str] | None:
+        manifest = self.manifests.get(library)
+        if manifest is None:
+            return None
+        target = manifest.template_by_name(template)
+        func = self.func_of.get((library, template))
+        if target is None or func is None:
+            return None
+        return target, func
+
+
+@dataclass
+class ProjectOutput:
+    """Result of :func:`generate_project`: output filename -> module source."""
+
+    files: dict[str, str] = field(default_factory=dict)
+    plans: list[DeploymentPlan] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+
 class _Code:
     """Tiny indentation-aware source buffer (4-space indents)."""
 
@@ -102,6 +144,13 @@ class _GenState:
     warnings: list[str] = field(default_factory=list)
     func_names: set[str] = field(default_factory=set)
     workflow_params: dict[str, str] = field(default_factory=dict)
+    # Cross-manifest resolution within this module: (manifest name, template
+    # name) -> (template, function name). Covers multi-document inputs.
+    module_registry: dict[tuple[str, str], tuple[Template, str]] = field(default_factory=dict)
+    # The shared-templates module of the surrounding project, if any.
+    shared: SharedModuleInfo | None = None
+    # Function names to import from the shared module (collected as used).
+    shared_imports: set[str] = field(default_factory=set)
 
     def base_scope(self, inputs: dict[str, str] | None = None) -> Scope:
         return Scope(
@@ -111,6 +160,30 @@ class _GenState:
             warnings=self.warnings,
         )
 
+    def resolve_call(
+        self, wf: Workflow, call: Call, func_of: dict[str, str]
+    ) -> tuple[Template, str] | None:
+        """Find the template + generated function a call refers to.
+
+        Resolution order: inline template in the same manifest, then a
+        library manifest generated into this module (multi-document input),
+        then the project's shared-templates module (recorded as an import).
+        """
+        if not call.template_ref:
+            target = wf.template_by_name(call.template)
+            if target is not None:
+                return target, func_of[call.template]
+            return None
+        hit = self.module_registry.get((call.template_ref, call.template))
+        if hit is not None:
+            return hit
+        if self.shared is not None:
+            shared_hit = self.shared.lookup(call.template_ref, call.template)
+            if shared_hit is not None:
+                self.shared_imports.add(shared_hit[1])
+                return shared_hit
+        return None
+
 
 def generate_code(workflows: list[Workflow], options: GeneratorOptions | None = None) -> str:
     """Convert parsed :class:`Workflow` objects into a single Prefect module."""
@@ -119,36 +192,140 @@ def generate_code(workflows: list[Workflow], options: GeneratorOptions | None = 
 
 
 def generate_module(
-    workflows: list[Workflow], options: GeneratorOptions | None = None
+    workflows: list[Workflow],
+    options: GeneratorOptions | None = None,
+    shared: SharedModuleInfo | None = None,
 ) -> tuple[str, list[DeploymentPlan]]:
     """Generate a Prefect module and the deployment plan for each workflow.
 
     Returns the source code plus one :class:`DeploymentPlan` per workflow (in
     input order), so callers can build a ``prefect.yaml`` that references the
     exact flow-function names this module defines.
-    """
-    if not workflows:
-        raise ValueError("No workflows to generate from.")
-    gen = _GenState(options or GeneratorOptions())
 
-    # Collect workflow parameters (declared + referenced) so deep `{{workflow.*}}`
-    # references resolve against a shared, runtime-overridable dict.
+    ``shared`` connects the module to a project's shared-templates module:
+    ``templateRef`` call sites then resolve to imported functions instead of
+    stubs (see :func:`generate_project`).
+    """
+    gen = _GenState(options or GeneratorOptions(), shared=shared)
+    code, plans = _generate_module(workflows, gen)
+    return code, plans
+
+
+def generate_shared_module(
+    libraries: list[Workflow],
+    options: GeneratorOptions | None = None,
+    extra_workflow_params: dict[str, str] | None = None,
+) -> tuple[str, SharedModuleInfo]:
+    """Generate the shared module for a project's template libraries.
+
+    ``extra_workflow_params`` merges the whole project's workflow-parameter
+    defaults into this module's ``WORKFLOW_PARAMETERS`` dict, which workflow
+    modules import so every module reads and writes the same dict.
+    """
+    opts = replace(options or GeneratorOptions(), serve=False)
+    gen = _GenState(opts)
+    code, _plans = _generate_module(libraries, gen, extra_workflow_params)
+    return code, SharedModuleInfo(
+        func_of={key: func for key, (_tmpl, func) in gen.module_registry.items()},
+        manifests={wf.display_name: wf for wf in libraries},
+    )
+
+
+def generate_project(project: Project, options: GeneratorOptions | None = None) -> ProjectOutput:
+    """Generate every module for a linked project.
+
+    ``WorkflowTemplate`` / ``ClusterWorkflowTemplate`` manifests are emitted
+    once into ``shared_templates.py``; each source file with runnable
+    workflows becomes ``<stem>_flow.py``, importing shared functions as
+    needed. Library manifests get no deployment plans (they are code, not
+    schedulable workloads); runnable workflows keep exactly one plan each.
+    """
+    out = ProjectOutput(warnings=list(project.warnings))
+    libraries = project.libraries
+
+    shared_info: SharedModuleInfo | None = None
+    if libraries:
+        # The shared module owns the project-wide WORKFLOW_PARAMETERS dict, so
+        # seed it with defaults from every manifest, not just the libraries.
+        all_defaults = _collect_wp_defaults([wf for file in project.files for wf in file.workflows])
+        shared_code, shared_info = generate_shared_module(
+            libraries, options, extra_workflow_params=all_defaults
+        )
+        out.files[f"{SHARED_MODULE_NAME}.py"] = shared_code
+
+    for file in project.files:
+        runnable = file.runnable
+        if not runnable:
+            continue
+        code, plans = generate_module(runnable, options, shared=shared_info)
+        filename = _unique_filename(f"{file.name}_flow.py", out.files)
+        out.files[filename] = code
+        for plan in plans:
+            plan.entrypoint_file = filename
+        out.plans.extend(plans)
+
+    if not out.files:
+        raise ValueError("No workflows to generate from.")
+    return out
+
+
+def _collect_wp_defaults(workflows: list[Workflow]) -> dict[str, str]:
+    """Workflow-parameter defaults, declared or referenced, across manifests."""
     wp_defaults: dict[str, str] = {}
     for wf in workflows:
         for param in wf.arguments:
             wp_defaults.setdefault(param.name, param.value or param.default or "")
         for name in sorted(_referenced_workflow_params(wf)):
             wp_defaults.setdefault(name, "")
+    return wp_defaults
+
+
+def _unique_filename(name: str, existing: dict[str, str]) -> str:
+    if name not in existing:
+        return name
+    stem, _, suffix = name.rpartition(".")
+    counter = 2
+    while f"{stem}_{counter}.{suffix}" in existing:
+        counter += 1
+    return f"{stem}_{counter}.{suffix}"
+
+
+def _generate_module(
+    workflows: list[Workflow],
+    gen: _GenState,
+    extra_workflow_params: dict[str, str] | None = None,
+) -> tuple[str, list[DeploymentPlan]]:
+    if not workflows:
+        raise ValueError("No workflows to generate from.")
+
+    # Collect workflow parameters (declared + referenced) so deep `{{workflow.*}}`
+    # references resolve against a shared, runtime-overridable dict. The
+    # module's own declared defaults win over project-wide extras.
+    wp_defaults = _collect_wp_defaults(workflows)
+    for name, value in (extra_workflow_params or {}).items():
+        if not wp_defaults.get(name):
+            wp_defaults[name] = value
     gen.workflow_params = {name: f"WORKFLOW_PARAMETERS[{_squote(name)}]" for name in wp_defaults}
 
     body = _Code()
     served: list[tuple[Workflow, str]] = []
     plans: list[DeploymentPlan] = []
 
+    # Assign every function name up front so cross-manifest references within
+    # this module (multi-document inputs) resolve regardless of order.
+    func_maps: list[dict[str, str]] = []
+    for wf in workflows:
+        func_of = _assign_func_names(wf, gen)
+        func_maps.append(func_of)
+        for template in wf.templates:
+            gen.module_registry.setdefault(
+                (wf.display_name, template.name), (template, func_of[template.name])
+            )
+
     for index, wf in enumerate(workflows):
         for note in wf.warnings:
             gen.warnings.append(f"[{wf.display_name}] {note}")
-        func_of = _assign_func_names(wf, gen)
+        func_of = func_maps[index]
         if index:
             body.add()
             body.add(f"# {'=' * 70}")
@@ -456,7 +633,7 @@ def _emit_composite_flow(
     code.add(f"def {func}({_signature(template, gen)}):")
     code.add(f'"""Argo {template.kind.value} template \'{template.name}\'."""', 1)
 
-    sync_calls = _composite_sync_calls(wf, template)
+    sync_calls = _composite_sync_calls(wf, template, func_of, gen)
 
     if template.kind == TemplateKind.DAG:
         ordered = _topo_sort(template.dag_tasks)
@@ -479,7 +656,9 @@ def _emit_composite_flow(
     code.add("return None", 1)
 
 
-def _composite_sync_calls(wf: Workflow, template: Template) -> set[str]:
+def _composite_sync_calls(
+    wf: Workflow, template: Template, func_of: dict[str, str], gen: _GenState
+) -> set[str]:
     """Names of calls whose target is itself composite (run inline, not submitted)."""
     sync: set[str] = set()
     calls = (
@@ -488,8 +667,8 @@ def _composite_sync_calls(wf: Workflow, template: Template) -> set[str]:
         else [c for group in template.step_groups for c in group]
     )
     for call in calls:
-        target = wf.template_by_name(call.template)
-        if target is not None and target.is_composite:
+        resolved = gen.resolve_call(wf, call, func_of)
+        if resolved is not None and resolved[0].is_composite:
             sync.add(call.name)
     return sync
 
@@ -506,13 +685,20 @@ def _emit_call(
     sync_calls: set[str],
 ) -> None:
     fut_var = f"{sanitize_identifier(call.name)}_fut"
-    target = wf.template_by_name(call.template)
+    resolved = gen.resolve_call(wf, call, func_of)
 
-    code.add(f"# {call.name} -> template '{call.template}'", ind)
-    if target is None:
+    ref_note = f" (templateRef '{call.template_ref}')" if call.template_ref else ""
+    code.add(f"# {call.name} -> template '{call.template}'{ref_note}", ind)
+    if resolved is None:
+        where = (
+            f"in WorkflowTemplate '{call.template_ref}' (not in this conversion's input)"
+            if call.template_ref
+            else "in this manifest"
+        )
         gen.warnings.append(
-            f"Call '{call.name}' references unknown template '{call.template}' "
-            "(cross-file templateRef?); emitted as a stub."
+            f"Call '{call.name}' references template '{call.template}' {where}; "
+            "emitted as a stub. Include the referenced manifest in the conversion "
+            "input to resolve it."
         )
         code.add(
             f"raise NotImplementedError({json.dumps(f'Unresolved templateRef: {call.template}')})",
@@ -521,9 +707,23 @@ def _emit_call(
         code.add(f"{fut_var} = None", ind)
         return
 
-    target_func = func_of[call.template]
+    target, target_func = resolved
     is_sync = call.name in sync_calls
     wait_clause = _wait_clause(wait_names)
+
+    if call.depends and not depends_is_plain(call.depends):
+        gen.warnings.append(
+            f"Call '{call.name}' uses `depends: {call.depends}`; dependency edges are "
+            "preserved, but status-based gating (Failed/Errored/||) needs manual review."
+        )
+        code.add(
+            f"# TODO(argo2prefect): Argo gated this on `depends: {call.depends}`.",
+            ind,
+        )
+        code.add(
+            "#   wait_for waits for upstream completion; add success/failure checks to match.",
+            ind,
+        )
 
     body_ind = ind
     if call.when:
@@ -625,7 +825,7 @@ def _wait_clause(wait_names: list[str]) -> str:
 # Main flow + entrypoint wiring
 # --------------------------------------------------------------------------- #
 def _emit_main_flow(code: _Code, wf: Workflow, func_of: dict[str, str], gen: _GenState) -> str:
-    entry = _resolve_entrypoint(wf, gen)
+    resolved_entry = _resolve_entrypoint(wf, func_of, gen)
     main_name = unique(
         sanitize_identifier(wf.display_name, prefix="main_flow") + "_flow", gen.func_names
     )
@@ -647,29 +847,56 @@ def _emit_main_flow(code: _Code, wf: Workflow, func_of: dict[str, str], gen: _Ge
         )
         code.add(f"WORKFLOW_PARAMETERS.update({{{updates}}})", 1)
 
-    if entry is None:
+    if resolved_entry is None:
         code.add("# TODO: no entrypoint template found; nothing to run.", 1)
         code.add("return None", 1)
         return main_name
 
-    entry_func = func_of[entry.name]
+    entry, entry_func = resolved_entry
     kwargs = _entrypoint_kwargs(wf, entry)
     code.add(f"return {entry_func}({kwargs})", 1)
     return main_name
 
 
-def _resolve_entrypoint(wf: Workflow, gen: _GenState) -> Template | None:
+def _resolve_entrypoint(
+    wf: Workflow, func_of: dict[str, str], gen: _GenState
+) -> tuple[Template, str] | None:
+    """Find the template + function the main flow should invoke.
+
+    A spec-level ``workflowTemplateRef`` resolves into the project's shared
+    module (the referenced library's entrypoint, or the workflow's own
+    ``entrypoint`` override looked up inside that library).
+    """
+    ref = wf.workflow_template_ref
+    if ref:
+        if gen.shared is not None:
+            entry_name = wf.entrypoint or (
+                gen.shared.manifests[ref].entrypoint if ref in gen.shared.manifests else None
+            )
+            if entry_name:
+                hit = gen.shared.lookup(ref, entry_name)
+                if hit is not None:
+                    gen.shared_imports.add(hit[1])
+                    return hit[0], hit[1]
+        gen.warnings.append(
+            f"[{wf.display_name}] workflowTemplateRef '{ref}' could not be resolved; "
+            "include the referenced manifest in the conversion input."
+        )
     if wf.entrypoint:
         target = wf.template_by_name(wf.entrypoint)
         if target is not None:
-            return target
-        gen.warnings.append(
-            f"[{wf.display_name}] entrypoint '{wf.entrypoint}' not found; using a fallback."
-        )
+            return target, func_of[wf.entrypoint]
+        if not ref:
+            gen.warnings.append(
+                f"[{wf.display_name}] entrypoint '{wf.entrypoint}' not found; using a fallback."
+            )
     for template in wf.templates:
         if template.is_composite:
-            return template
-    return wf.templates[0] if wf.templates else None
+            return template, func_of[template.name]
+    if wf.templates:
+        first = wf.templates[0]
+        return first, func_of[first.name]
+    return None
 
 
 def _entrypoint_kwargs(wf: Workflow, entry: Template) -> str:
@@ -694,7 +921,8 @@ def _build_header(gen: _GenState, wp_defaults: dict[str, str], workflows: list[W
         # PEP 723 inline script metadata: `uv run flow.py` auto-installs these
         # and runs the flow with no manual environment setup. Harmless to others.
         deps = ['"prefect>=3,<4"']
-        if "shell" in gen.imports:
+        # Modules importing the shared module inherit its runtime needs too.
+        if "shell" in gen.imports or gen.shared_imports:
             deps.append('"prefect-shell>=0.3"')
         code.add("# /// script")
         code.add('# requires-python = ">=3.9"')
@@ -737,7 +965,16 @@ def _build_header(gen: _GenState, wp_defaults: dict[str, str], workflows: list[W
         code.add("from prefect_shell import ShellOperation")
 
     code.add()
-    code.add(f"WORKFLOW_PARAMETERS = {_py_literal(wp_defaults)}")
+    if gen.shared_imports and gen.shared is not None:
+        # One WORKFLOW_PARAMETERS dict per project: this module and the shared
+        # templates it calls must read/write the same object, so import it.
+        names = ", ".join(["WORKFLOW_PARAMETERS", *sorted(gen.shared_imports)])
+        code.add(f"from {gen.shared.module_name} import {names}")
+        if wp_defaults:
+            code.add()
+            code.add(f"WORKFLOW_PARAMETERS.update({_py_literal(wp_defaults)})")
+    else:
+        code.add(f"WORKFLOW_PARAMETERS = {_py_literal(wp_defaults)}")
 
     if "render" in gen.helpers:
         code.add()

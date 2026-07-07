@@ -57,7 +57,11 @@ argo2prefect convert examples/argo/dag-diamond.yaml
 # Convert to a file, executing containers via `docker run`
 argo2prefect convert examples/argo/dag-diamond.yaml -o flow.py --runtime docker
 
-# Convert every *.yaml/*.yml in a directory into an output folder
+# Convert every *.yaml/*.yml in a directory into an output folder.
+# The directory is converted as ONE linked project: templateRef /
+# workflowTemplateRef resolve across files, and WorkflowTemplate /
+# ClusterWorkflowTemplate manifests are emitted once into a shared
+# shared_templates.py module that the per-workflow files import.
 argo2prefect convert ./argo-manifests -o ./prefect_flows
 
 # Convert AND emit a Prefect Cloud deployment config + runbook

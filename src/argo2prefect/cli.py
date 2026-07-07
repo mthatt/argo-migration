@@ -27,10 +27,9 @@ from pathlib import Path
 
 from . import __version__
 from .deploy import DeployOptions, render_deploy_md, render_prefect_yaml
-from .generator import DeploymentPlan, GeneratorOptions, generate_module
+from .generator import DeploymentPlan, GeneratorOptions, generate_module, generate_project
 from .parser import ParseError, parse_workflows
-
-YAML_SUFFIXES = {".yaml", ".yml"}
+from .project import load_project
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -154,36 +153,52 @@ def _cmd_convert(args: argparse.Namespace) -> int:
 
 
 def _convert_directory(src: Path, args: argparse.Namespace, options: GeneratorOptions) -> int:
-    manifests = sorted(
-        p for p in src.rglob("*") if p.suffix.lower() in YAML_SUFFIXES and p.is_file()
-    )
-    if not manifests:
+    """Convert a directory as one linked project.
+
+    All manifests are loaded up front so ``templateRef`` /
+    ``workflowTemplateRef`` resolve across files: WorkflowTemplate and
+    ClusterWorkflowTemplate manifests are emitted once into
+    ``shared_templates.py`` and the per-workflow modules import from it.
+    """
+    project = load_project([src])
+    if not project.files and not project.skipped:
         print(f"error: no .yaml/.yml files found in {src}", file=sys.stderr)
+        return 2
+
+    for name, reason in project.skipped:
+        print(f"skip {name}: {reason}", file=sys.stderr)
+
+    try:
+        out = generate_project(project, options)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
 
     out_dir = Path(args.output) if args.output and args.output != "-" else src
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    converted = 0
-    all_plans: list[DeploymentPlan] = []
-    for manifest in manifests:
-        try:
-            code, plans = _convert_text(manifest.read_text(encoding="utf-8"), options, args)
-        except ParseError as exc:
-            print(f"skip {manifest.name}: {exc}", file=sys.stderr)
-            continue
-        out_path = out_dir / f"{manifest.stem}_flow.py"
+    for filename, code in out.files.items():
+        out_path = out_dir / filename
         out_path.write_text(code, encoding="utf-8")
         print(f"Wrote {out_path}", file=sys.stderr)
-        for plan in plans:
-            plan.entrypoint_file = out_path.name
-        all_plans.extend(plans)
-        converted += 1
 
-    print(f"Converted {converted}/{len(manifests)} manifest(s).", file=sys.stderr)
-    if args.emit_prefect_yaml and all_plans:
-        _emit_deploy_artifacts(out_dir, all_plans, args)
-    return 0 if converted else 2
+    libraries = len(project.libraries)
+    if libraries:
+        print(
+            f"Linked {libraries} shared template librar{'y' if libraries == 1 else 'ies'} "
+            "into shared_templates.py.",
+            file=sys.stderr,
+        )
+    if not args.quiet:
+        _print_warnings([wf for file in project.files for wf in file.workflows])
+        for warning in out.warnings:
+            print(f"  - {warning}", file=sys.stderr)
+    print(
+        f"Converted {len(out.files)} module(s) from {len(project.files)} manifest file(s).",
+        file=sys.stderr,
+    )
+    if args.emit_prefect_yaml and out.plans:
+        _emit_deploy_artifacts(out_dir, out.plans, args)
+    return 0
 
 
 def _convert_text(

@@ -132,7 +132,13 @@ class Call:
     with_items: list[Any] | None = None
     with_param: str | None = None
     # A step/task may invoke another workflow template instead of an inline one.
+    # ``template_ref`` is the referenced WorkflowTemplate's name; ``template``
+    # then names the template *inside* it.
     template_ref: str | None = None
+    # Raw ``depends`` expression (DAG tasks only). Dependency *edges* extracted
+    # from it are merged into ``dependencies``; status qualifiers / OR logic
+    # beyond "all upstream succeeded" are flagged for review by the generator.
+    depends: str | None = None
 
 
 @dataclass
@@ -183,6 +189,12 @@ class Workflow:
     # Populated for CronWorkflow.
     schedule: str | None = None
     timezone: str | None = None
+
+    # Spec-level ``workflowTemplateRef``: the whole spec (entrypoint, templates)
+    # comes from the named WorkflowTemplate; this manifest only overrides
+    # arguments/metadata. Resolved by :mod:`argo2prefect.project`.
+    workflow_template_ref: str | None = None
+    cluster_workflow_template_ref: bool = False
 
     labels: dict[str, str] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
