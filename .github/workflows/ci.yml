@@ -29,9 +29,10 @@ jobs:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
+      # setup-uv creates and activates .venv for the requested Python itself;
+      # running `uv venv` again would fail on the existing environment.
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: uv venv --python ${{ matrix.python-version }}
       - run: uv pip install -e ".[dev,generated]"
       - run: .venv/bin/python -m pytest
