@@ -135,7 +135,7 @@ spec:
       container: {image: alpine, command: [echo], args: [hi]}
 """
     code = generate_code(parse_workflows(manifest))
-    assert "TODO(argo2prefect): Argo gated this on `depends:" in code
+    assert "TODO(A2P-102): Argo gated this on `depends:" in code
     assert "a.Failed || a.Succeeded" in code
 
 

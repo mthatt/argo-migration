@@ -27,7 +27,13 @@ from pathlib import Path
 
 from . import __version__
 from .deploy import DeployOptions, render_deploy_md, render_prefect_yaml
-from .generator import DeploymentPlan, GeneratorOptions, generate_module, generate_project
+from .generator import (
+    DeploymentPlan,
+    GeneratorOptions,
+    format_code,
+    generate_module,
+    generate_project,
+)
 from .parser import ParseError, parse_workflows
 from .project import load_project
 
@@ -208,7 +214,7 @@ def _convert_text(
     code, plans = generate_module(workflows, options)
     if not args.quiet:
         _print_warnings(workflows)
-    return code, plans
+    return format_code(code), plans
 
 
 def _emit_deploy_artifacts(

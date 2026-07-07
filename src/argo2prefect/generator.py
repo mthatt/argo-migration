@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import sys
 from dataclasses import dataclass, field, replace
 
 from .expressions import Scope, translate_condition, translate_value
@@ -159,6 +161,7 @@ class _GenState:
             inputs=inputs or {},
             workflow_params=dict(self.workflow_params),
             used_runtime=self.used_runtime,
+            helpers=self.helpers,
             warnings=self.warnings,
         )
 
@@ -190,6 +193,27 @@ class _GenState:
 def generate_code(workflows: list[Workflow], options: GeneratorOptions | None = None) -> str:
     """Convert parsed :class:`Workflow` objects into a single Prefect module."""
     code, _plans = generate_module(workflows, options)
+    return code
+
+
+def format_code(code: str) -> str:
+    """Format generated source with ruff (best effort).
+
+    Falls back to the unformatted code if ruff is unavailable or errors, so
+    formatting can never break a conversion.
+    """
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "ruff", "format", "--stdin-filename", "generated_flow.py", "-"],
+            input=code,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except Exception:
+        return code
+    if proc.returncode == 0 and proc.stdout:
+        return proc.stdout
     return code
 
 
@@ -253,7 +277,7 @@ def generate_project(project: Project, options: GeneratorOptions | None = None) 
         shared_code, shared_info = generate_shared_module(
             libraries, options, extra_workflow_params=all_defaults
         )
-        out.files[f"{SHARED_MODULE_NAME}.py"] = shared_code
+        out.files[f"{SHARED_MODULE_NAME}.py"] = format_code(shared_code)
 
     for file in project.files:
         runnable = file.runnable
@@ -261,7 +285,7 @@ def generate_project(project: Project, options: GeneratorOptions | None = None) 
             continue
         code, plans = generate_module(runnable, options, shared=shared_info)
         filename = _unique_filename(f"{file.name}_flow.py", out.files)
-        out.files[filename] = code
+        out.files[filename] = format_code(code)
         for plan in plans:
             plan.entrypoint_file = filename
         out.plans.extend(plans)
@@ -456,16 +480,16 @@ def _behavior_decorator_args(template: Template, gen: _GenState) -> list[str]:
 def _emit_artifact_todos(code: _Code, ind: int, template: Template, gen: _GenState) -> int:
     """Anchor artifact follow-up work in the task body, with the storage
     location when the manifest declares one."""
-    for direction, artifacts in (
-        ("input", template.input_artifacts),
-        ("output", template.output_artifacts),
+    for direction, todo_code, artifacts in (
+        ("input", "A2P-103", template.input_artifacts),
+        ("output", "A2P-104", template.output_artifacts),
     ):
         for art in artifacts:
             where = f" from {art.storage}://{art.location}" if art.storage else ""
             path = f" at '{art.path}'" if art.path else ""
             verb = "fetch it before the command runs" if direction == "input" else "publish it"
             code.add(
-                f"# TODO(argo2prefect): {direction} artifact '{art.name}'{where}{path}; {verb}.",
+                f"# TODO({todo_code}): {direction} artifact '{art.name}'{where}{path}; {verb}.",
                 ind,
             )
     if template.input_artifacts or template.output_artifacts:
@@ -524,20 +548,25 @@ def _emit_container_body(
         code.add(f"_argv = [{', '.join(command_exprs)}]", ind)
         _emit_env_dict(code, ind, env_exprs)
         code.add("_out = ShellOperation(commands=[shlex.join(_argv)], env=_env).run()", ind)
+        if return_value:
+            code.add('return "\\n".join(_out)', ind)
     elif runtime == "docker":
-        gen.imports.add("shell")
-        gen.imports.add("shlex")
+        gen.imports.add("docker")
         _emit_env_dict(code, ind, env_exprs)
-        code.add('_parts = ["docker", "run", "--rm"]', ind)
-        code.add("for _k, _v in _env.items():", ind)
-        code.add('_parts += ["-e", f"{_k}={_v}"]', ind + 1)
-        code.add(f"_parts += [{json.dumps(image)}{_comma(command_exprs)}]", ind)
-        code.add("_out = ShellOperation(commands=[shlex.join(_parts)]).run()", ind)
+        command = f"[{', '.join(command_exprs)}]" if command_exprs else "None"
+        _emit_docker_run(code, ind, image, command)
+        if return_value:
+            code.add('return _out.decode().rstrip("\\n")', ind)
     else:  # kubernetes
-        _emit_kubectl_job(code, ind, image, command_exprs, env_exprs, scope, gen, name)
-
-    if return_value:
-        code.add('return "\\n".join(_out)', ind)
+        gen.helpers.add("k8s_job")
+        _emit_env_dict(code, ind, env_exprs)
+        command = f"[{', '.join(command_exprs)}]" if command_exprs else "None"
+        safe = sanitize_identifier(name).replace("_", "-")
+        code.add(
+            f"_out = _run_k8s_job({json.dumps(image)}, {command}, _env, {json.dumps(safe)})", ind
+        )
+        if return_value:
+            code.add('return _out.rstrip("\\n")', ind)
 
 
 def _emit_script_body(
@@ -554,11 +583,26 @@ def _emit_script_body(
     image = spec.image or "python:3-slim"
 
     if runtime == "kubernetes":
-        command_exprs = [json.dumps(interpreter), json.dumps("-c"), "_script"]
-        _emit_kubectl_job(code, ind, image, command_exprs, env_exprs, scope, gen, template.name)
-        code.add('return "\\n".join(_out)', ind)
+        gen.helpers.add("k8s_job")
+        _emit_env_dict(code, ind, env_exprs)
+        safe = sanitize_identifier(template.name).replace("_", "-")
+        code.add(
+            f"_out = _run_k8s_job({json.dumps(image)}, "
+            f'[{json.dumps(interpreter)}, "-c", _script], _env, {json.dumps(safe)})',
+            ind,
+        )
+        code.add('return _out.rstrip("\\n")', ind)
         return
 
+    if runtime == "docker":
+        # The script goes straight into the container command — no temp file.
+        gen.imports.add("docker")
+        _emit_env_dict(code, ind, env_exprs)
+        _emit_docker_run(code, ind, image, f'[{json.dumps(interpreter)}, "-c", _script]')
+        code.add('return _out.decode().rstrip("\\n")', ind)
+        return
+
+    # shell: write the script to a temp file and run it on the worker host.
     gen.imports.add("shell")
     gen.imports.add("shlex")
     gen.imports.add("os")
@@ -568,68 +612,24 @@ def _emit_script_body(
     code.add('with os.fdopen(_fd, "w") as _fh:', ind)
     code.add("_fh.write(_script)", ind + 1)
     code.add("try:", ind)
-    if runtime == "shell":
-        code.add(f"_cmd = shlex.join([{json.dumps(interpreter)}, _path])", ind + 1)
-        code.add("_out = ShellOperation(commands=[_cmd], env=_env).run()", ind + 1)
-    else:  # docker
-        code.add('_parts = ["docker", "run", "--rm", "-i"]', ind + 1)
-        code.add("for _k, _v in _env.items():", ind + 1)
-        code.add('_parts += ["-e", f"{_k}={_v}"]', ind + 2)
-        code.add(f"_parts += [{json.dumps(image)}, {json.dumps(interpreter)}]", ind + 1)
-        code.add('_cmd = shlex.join(_parts) + " < " + shlex.quote(_path)', ind + 1)
-        code.add("_out = ShellOperation(commands=[_cmd]).run()", ind + 1)
+    code.add(f"_cmd = shlex.join([{json.dumps(interpreter)}, _path])", ind + 1)
+    code.add("_out = ShellOperation(commands=[_cmd], env=_env).run()", ind + 1)
     code.add("finally:", ind)
     code.add("os.unlink(_path)", ind + 1)
     code.add('return "\\n".join(_out)', ind)
 
 
-def _emit_kubectl_job(
-    code: _Code,
-    ind: int,
-    image: str,
-    command_exprs: list[str],
-    env_exprs: dict[str, str],
-    scope: Scope,
-    gen: _GenState,
-    name: str,
-) -> None:
-    gen.imports.add("shell")
-    gen.imports.add("json")
-    gen.imports.add("os")
-    gen.imports.add("tempfile")
-    gen.imports.add("uuid")
-    safe = sanitize_identifier(name).replace("_", "-")
-    code.add(f'_job_name = "{safe}-" + uuid.uuid4().hex[:8]', ind)
-    code.add(f"_env = [{_env_list(env_exprs)}]", ind)
-    code.add("_container = {", ind)
-    code.add('"name": "main",', ind + 1)
-    code.add(f'"image": {json.dumps(image)},', ind + 1)
-    if command_exprs:
-        code.add(f'"command": [{", ".join(command_exprs)}],', ind + 1)
-    code.add('"env": _env,', ind + 1)
-    code.add("}", ind)
-    code.add("_manifest = {", ind)
-    code.add('"apiVersion": "batch/v1",', ind + 1)
-    code.add('"kind": "Job",', ind + 1)
-    code.add('"metadata": {"name": _job_name},', ind + 1)
-    code.add('"spec": {', ind + 1)
-    code.add('"backoffLimit": 0,', ind + 2)
-    code.add(
-        '"template": {"spec": {"restartPolicy": "Never", "containers": [_container]}},', ind + 2
-    )
-    code.add("},", ind + 1)
-    code.add("}", ind)
-    code.add('_fd, _path = tempfile.mkstemp(suffix=".json")', ind)
-    code.add('with os.fdopen(_fd, "w") as _fh:', ind)
-    code.add("json.dump(_manifest, _fh)", ind + 1)
-    code.add("try:", ind)
-    code.add("ShellOperation(commands=[", ind + 1)
-    code.add('f"kubectl apply -f {_path}",', ind + 2)
-    code.add('f"kubectl wait --for=condition=complete --timeout=1h job/{_job_name}",', ind + 2)
-    code.add("]).run()", ind + 1)
-    code.add('_out = ShellOperation(commands=[f"kubectl logs job/{_job_name}"]).run()', ind + 1)
-    code.add("finally:", ind)
-    code.add("os.unlink(_path)", ind + 1)
+def _emit_docker_run(code: _Code, ind: int, image: str, command: str) -> None:
+    """Run a container via the Docker SDK and bind its combined logs to _out."""
+    code.add("_client = docker.from_env()", ind)
+    code.add("_out = _client.containers.run(", ind)
+    code.add(f"{json.dumps(image)},", ind + 1)
+    code.add(f"{command},", ind + 1)
+    code.add("environment=_env,", ind + 1)
+    code.add("remove=True,", ind + 1)
+    code.add("stdout=True,", ind + 1)
+    code.add("stderr=True,", ind + 1)
+    code.add(")", ind)
 
 
 def _emit_resource_body(
@@ -682,7 +682,8 @@ def _emit_suspend_body(code: _Code, ind: int, template: Template, gen: _GenState
     seconds = _duration_to_seconds(duration)
     if seconds is None:
         code.add(
-            "# TODO: indefinite suspend. Use prefect.flow_runs.pause_flow_run() if needed.", ind
+            "# TODO(A2P-107): indefinite suspend. Use prefect.flow_runs.pause_flow_run() if needed.",
+            ind,
         )
         code.add("return None", ind)
     else:
@@ -694,6 +695,9 @@ def _emit_suspend_body(code: _Code, ind: int, template: Template, gen: _GenState
 def _emit_stub_body(code: _Code, ind: int, template: Template, gen: _GenState) -> None:
     gen.warnings.append(
         f"Template '{template.name}' ({template.kind.value}) emitted as a stub; implement manually."
+    )
+    code.add(
+        f"# TODO(A2P-112): template type '{template.kind.value}' has no automatic migration.", ind
     )
     code.add(
         f"raise NotImplementedError("
@@ -792,6 +796,7 @@ def _emit_call(
             "emitted as a stub. Include the referenced manifest in the conversion "
             "input to resolve it."
         )
+        code.add("# TODO(A2P-108): unresolved templateRef; include the referenced manifest.", ind)
         code.add(
             f"raise NotImplementedError({json.dumps(f'Unresolved templateRef: {call.template}')})",
             ind,
@@ -809,7 +814,7 @@ def _emit_call(
             "preserved, but status-based gating (Failed/Errored/||) needs manual review."
         )
         code.add(
-            f"# TODO(argo2prefect): Argo gated this on `depends: {call.depends}`.",
+            f"# TODO(A2P-102): Argo gated this on `depends: {call.depends}`.",
             ind,
         )
         code.add(
@@ -821,7 +826,10 @@ def _emit_call(
     if call.when:
         cond = translate_condition(call.when, scope)
         code.add(f"{fut_var} = None  # conditional", ind)
-        code.add(f"if {cond}:  # TODO(argo2prefect): review translated condition", ind)
+        if cond == "False":
+            code.add(f"if False:  # TODO(A2P-110): untranslatable Argo condition: {call.when}", ind)
+        else:
+            code.add(f"if {cond}:  # TODO(A2P-101): review translated condition", ind)
         body_ind = ind + 1
 
     looped = call.with_items is not None or bool(call.with_param) or call.with_sequence is not None
@@ -937,11 +945,18 @@ def _emit_main_flow(code: _Code, wf: Workflow, func_of: dict[str, str], gen: _Ge
         sanitize_identifier(wf.display_name, prefix="main_flow") + "_flow", gen.func_names
     )
 
+    # Typed signatures at the API boundary (what a client sees in the Prefect
+    # UI); values are normalized back to strings for the parameter dict, since
+    # Argo semantics are string-based throughout.
     params = []
+    typed_idents: set[str] = set()
     for param in wf.arguments:
         ident = sanitize_identifier(param.name)
-        default = json.dumps(param.value if param.value is not None else (param.default or ""))
-        params.append(f"{ident}: str = {default}")
+        raw_default = param.value if param.value is not None else (param.default or "")
+        annotation, literal = _infer_param_type(raw_default)
+        if annotation != "str":
+            typed_idents.add(ident)
+        params.append(f"{ident}: {annotation} = {literal}")
 
     hook_name = _emit_exit_hook(code, wf, func_of, gen, main_name)
 
@@ -960,20 +975,42 @@ def _emit_main_flow(code: _Code, wf: Workflow, func_of: dict[str, str], gen: _Ge
 
     if wf.arguments:
         updates = ", ".join(
-            f"{json.dumps(p.name)}: {sanitize_identifier(p.name)}" for p in wf.arguments
+            f"{json.dumps(p.name)}: {_as_str(sanitize_identifier(p.name), typed_idents)}"
+            for p in wf.arguments
         )
         code.add(f"WORKFLOW_PARAMETERS.update({{{updates}}})", 1)
 
     if resolved_entry is None:
-        code.add("# TODO: no entrypoint template found; nothing to run.", 1)
+        code.add("# TODO(A2P-109): no entrypoint template found; nothing to run.", 1)
         code.add("return None", 1)
         return main_name
 
     ind = _emit_sync_guard(code, 1, wf.synchronization, gen)
     entry, entry_func = resolved_entry
-    kwargs = _entrypoint_kwargs(wf, entry)
+    kwargs = _entrypoint_kwargs(wf, entry, typed_idents)
     code.add(f"return {entry_func}({kwargs})", ind)
     return main_name
+
+
+_INT_RE = re.compile(r"-?\d+")
+_FLOAT_RE = re.compile(r"-?\d+\.\d+")
+
+
+def _infer_param_type(default: str) -> tuple[str, str]:
+    """Infer a (annotation, default-literal) pair from an Argo string default.
+
+    Only numeric types are inferred: Argo booleans stay strings because every
+    comparison in translated conditions is string-based (`x == "true"`).
+    """
+    if _INT_RE.fullmatch(default):
+        return "int", default
+    if _FLOAT_RE.fullmatch(default):
+        return "float", default
+    return "str", json.dumps(default)
+
+
+def _as_str(ident: str, typed_idents: set[str]) -> str:
+    return f"str({ident})" if ident in typed_idents else ident
 
 
 def _emit_exit_hook(
@@ -1001,7 +1038,7 @@ def _emit_exit_hook(
     code.add(f'"""Argo onExit handler \'{wf.on_exit}\' (runs on success and failure)."""', 1)
     if any(p.default is None for p in exit_template.inputs):
         code.add(
-            "# TODO(argo2prefect): the exit template has required inputs; Argo passed",
+            "# TODO(A2P-106): the exit template has required inputs; Argo passed",
             1,
         )
         code.add("#   `{{workflow.*}}` context here — supply equivalents from `state`.", 1)
@@ -1050,13 +1087,14 @@ def _resolve_entrypoint(
     return None
 
 
-def _entrypoint_kwargs(wf: Workflow, entry: Template) -> str:
+def _entrypoint_kwargs(wf: Workflow, entry: Template, typed_idents: set[str]) -> str:
     wf_arg_names = {p.name for p in wf.arguments}
     parts: list[str] = []
     for param in entry.inputs:
         ident = sanitize_identifier(param.name)
         if param.name in wf_arg_names:
-            parts.append(f"{ident}={ident}")
+            # Template inputs are str-typed; normalize inferred numerics.
+            parts.append(f"{ident}={_as_str(ident, typed_idents)}")
         elif param.default is not None:
             parts.append(f"{ident}={json.dumps(param.default)}")
     return ", ".join(parts)
@@ -1075,6 +1113,10 @@ def _build_header(gen: _GenState, wp_defaults: dict[str, str], workflows: list[W
         # Modules importing the shared module inherit its runtime needs too.
         if "shell" in gen.imports or gen.shared_imports:
             deps.append('"prefect-shell>=0.3"')
+        if "docker" in gen.imports or (gen.shared_imports and gen.options.runtime == "docker"):
+            deps.append('"docker>=7"')
+        if "k8s_job" in gen.helpers or (gen.shared_imports and gen.options.runtime == "kubernetes"):
+            deps.append('"kubernetes>=29"')
         code.add("# /// script")
         code.add('# requires-python = ">=3.9"')
         code.add(f"# dependencies = [{', '.join(deps)}]")
@@ -1108,6 +1150,10 @@ def _build_header(gen: _GenState, wp_defaults: dict[str, str], workflows: list[W
 
     if "timedelta" in gen.imports:
         code.add("from datetime import timedelta")
+    if "docker" in gen.imports:
+        code.add()
+        code.add("import docker")
+        code.add()
     prefect_imports = ["flow", "task"]
     if "unmapped" in gen.imports:
         prefect_imports.append("unmapped")
@@ -1144,6 +1190,12 @@ def _build_header(gen: _GenState, wp_defaults: dict[str, str], workflows: list[W
     if "sequence" in gen.helpers:
         code.add()
         code.add(_SEQUENCE_HELPER.rstrip())
+    if "k8s_job" in gen.helpers:
+        code.add()
+        code.add(_K8S_JOB_HELPER.rstrip())
+    if "output_param" in gen.helpers:
+        code.add()
+        code.add(_OUTPUT_PARAM_HELPER.rstrip())
 
     return code.render()
 
@@ -1201,14 +1253,6 @@ def _emit_env_dict(code: _Code, ind: int, env_exprs: dict[str, str]) -> None:
         return
     items = ", ".join(f"{json.dumps(k)}: {v}" for k, v in env_exprs.items())
     code.add(f"_env = {{{items}}}", ind)
-
-
-def _env_list(env_exprs: dict[str, str]) -> str:
-    return ", ".join(f'{{"name": {json.dumps(k)}, "value": {v}}}' for k, v in env_exprs.items())
-
-
-def _comma(items: list[str]) -> str:
-    return (", " + ", ".join(items)) if items else ""
 
 
 def _topo_sort(tasks: list) -> list:
@@ -1324,4 +1368,73 @@ def _argo_sequence(count=None, start=None, end=None, fmt=None):
         _s, _e = int(start or 0), int(end or 0)
         _values = range(_s, _e + 1) if _e >= _s else range(_s, _e - 1, -1)
     return [(fmt % _v) if fmt else str(_v) for _v in _values]
+'''
+
+_K8S_JOB_HELPER = '''
+import os as _os
+import time as _time
+import uuid as _uuid
+
+
+def _run_k8s_job(_image, _command, _env, _name_prefix, _timeout=3600):
+    """Run a Kubernetes Job and return its pod logs.
+
+    Uses in-cluster config when available, falling back to the local
+    kubeconfig. The Job is always deleted afterwards (no leaked Jobs).
+    TODO(A2P-111): namespace comes from $A2P_NAMESPACE (default "default").
+    """
+    from kubernetes import client as _k8s, config as _k8s_config
+
+    try:
+        _k8s_config.load_incluster_config()
+    except Exception:
+        _k8s_config.load_kube_config()
+    _ns = _os.environ.get("A2P_NAMESPACE", "default")
+    _name = f"{_name_prefix}-{_uuid.uuid4().hex[:8]}"
+    _container = {
+        "name": "main",
+        "image": _image,
+        "env": [{"name": _k, "value": str(_v)} for _k, _v in (_env or {}).items()],
+    }
+    if _command:
+        _container["command"] = list(_command)
+    _batch = _k8s.BatchV1Api()
+    _core = _k8s.CoreV1Api()
+    _batch.create_namespaced_job(
+        _ns,
+        {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {"name": _name},
+            "spec": {
+                "backoffLimit": 0,
+                "template": {"spec": {"restartPolicy": "Never", "containers": [_container]}},
+            },
+        },
+    )
+    try:
+        _deadline = _time.time() + _timeout
+        while True:
+            _status = _batch.read_namespaced_job(_name, _ns).status
+            if _status.succeeded:
+                break
+            if _status.failed:
+                raise RuntimeError(f"Kubernetes job {_name} failed")
+            if _time.time() > _deadline:
+                raise TimeoutError(f"Kubernetes job {_name} did not finish in {_timeout}s")
+            _time.sleep(2)
+        _pods = _core.list_namespaced_pod(_ns, label_selector=f"job-name={_name}")
+        return _core.read_namespaced_pod_log(_pods.items[0].metadata.name, namespace=_ns)
+    finally:
+        _batch.delete_namespaced_job(_name, _ns, propagation_policy="Background")
+'''
+
+_OUTPUT_PARAM_HELPER = '''
+def _argo_output_param(_stdout, _name):
+    """Argo read this output parameter from a file (`valueFrom`); only stdout
+    (`outputs.result`) is captured automatically. TODO(A2P-105)."""
+    raise NotImplementedError(
+        f"Output parameter {_name!r} came from a file in Argo (valueFrom.path/jsonPath). "
+        "Map it manually - only stdout (outputs.result) is migrated automatically."
+    )
 '''

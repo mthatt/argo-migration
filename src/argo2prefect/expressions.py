@@ -42,6 +42,8 @@ class Scope:
     item_var: str | None = None
     # Collected as a side effect: runtime imports needed (e.g. "flow_run").
     used_runtime: set[str] = field(default_factory=set)
+    # Collected as a side effect: generated-module helpers needed.
+    helpers: set[str] = field(default_factory=set)
     # Collected as a side effect: human-readable notes about unresolved bits.
     warnings: list[str] = field(default_factory=list)
 
@@ -145,6 +147,20 @@ def _resolve(token: str, scope: Scope, *, embedded: bool) -> str | None:
         return scope.workflow_params.get(name, f"WORKFLOW_PARAMETERS['{escaped}']")
     if token.startswith("tasks.") or token.startswith("steps."):
         parts = token.split(".")
+        if len(parts) >= 5 and parts[2] == "outputs" and parts[3] == "parameters":
+            # Named output parameters came from files (valueFrom); only stdout
+            # is captured, so route through a loud helper instead of silently
+            # substituting the wrong value.
+            scope.helpers.add("output_param")
+            param = ".".join(parts[4:])
+            scope.warnings.append(
+                f"'{token}': named output parameters are not migrated automatically "
+                "(only stdout); the generated _argo_output_param() raises until mapped."
+            )
+            var = scope.output_var(parts[1])
+            return f"_argo_output_param({var}.result(), {param!r})"
+        if len(parts) >= 4 and parts[2] == "outputs" and parts[3] not in ("result",):
+            return None  # exitCode / artifacts / ... — no faithful mapping.
         if len(parts) >= 2:
             var = scope.output_var(parts[1])
             return f"{var}.result()" if embedded else var
@@ -249,9 +265,19 @@ _SENTINEL = re.compile(r"__A2P\d+X__")
 _PY_KEYWORDS = {"and", "or", "not", "in", "is", "True", "False", "None"}
 
 #: Names allowed to appear in a translated expression, beyond scope-derived
-#: identifiers: the shared parameter dict, mapped conversion functions, and
-#: Prefect runtime handles.
-_KNOWN_NAMES = {"WORKFLOW_PARAMETERS", "int", "float", "str", "len", "flow_run", "task_run"}
+#: identifiers: the shared parameter dict, mapped conversion functions,
+#: Prefect runtime handles, and generated-module helpers.
+_KNOWN_NAMES = {
+    "WORKFLOW_PARAMETERS",
+    "int",
+    "float",
+    "str",
+    "len",
+    "flow_run",
+    "task_run",
+    "_argo_output_param",
+    "_argo_sequence",
+}
 
 _FUT_NAME = re.compile(r"\w+_fut$")
 

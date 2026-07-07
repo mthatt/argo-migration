@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from argo2prefect.generator import generate_code
+from argo2prefect.generator import format_code, generate_code
 from argo2prefect.parser import parse_workflows
 
 EXAMPLES = sorted((Path(__file__).parents[1] / "examples" / "argo").glob("*.yaml"))
@@ -22,7 +22,8 @@ GOLDEN_DIR = Path(__file__).parent / "golden"
 
 
 def _generate(manifest: Path) -> str:
-    return generate_code(parse_workflows(manifest.read_text(encoding="utf-8")))
+    # format_code so snapshots match what the CLI actually ships.
+    return format_code(generate_code(parse_workflows(manifest.read_text(encoding="utf-8"))))
 
 
 @pytest.mark.parametrize("manifest", EXAMPLES, ids=lambda p: p.stem)

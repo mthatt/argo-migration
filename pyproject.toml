@@ -27,6 +27,8 @@ classifiers = [
 ]
 dependencies = [
     "PyYAML>=6.0",
+    # Generated code is post-processed with `ruff format`.
+    "ruff>=0.8",
 ]
 
 [project.optional-dependencies]
