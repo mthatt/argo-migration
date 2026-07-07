@@ -11,6 +11,7 @@ The public API mirrors the three pipeline stages:
 
 from __future__ import annotations
 
+from .assess import Assessment, assess_project
 from .generator import (
     DeploymentPlan,
     GeneratorOptions,
@@ -30,6 +31,8 @@ __all__ = [
     "DeploymentPlan",
     "Project",
     "ProjectOutput",
+    "Assessment",
+    "assess_project",
     "parse_workflows",
     "generate_code",
     "generate_module",

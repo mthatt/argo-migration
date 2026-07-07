@@ -156,7 +156,19 @@ Make the rebuild measurable before changing behavior.
   sprig-function translation table for the common cases; everything else
   flagged clearly.
 
-### Phase 3 — Generator v2
+### Phase 3 — Generator v2 ✅ complete
+
+> Status: docker runtime now uses the Docker SDK (env, auto-remove, combined
+> logs; scripts stream into the container command — no temp files), and
+> kubernetes uses the official client via a generated `_run_k8s_job` helper
+> (in-cluster or kubeconfig auth, polled to completion, logs returned, Job
+> always deleted). Main-flow signatures are typed (int/float inferred) with
+> values normalized to strings internally to preserve Argo semantics. Named
+> output parameters no longer silently substitute stdout — they raise with
+> precise guidance until mapped. Every emitted module is `ruff format`ed
+> (best-effort) and every follow-up carries a stable `TODO(A2P-###)` code
+> (catalogued in `todos.py`). Decision: kept direct emitter dispatch over a
+> registry — six kinds × three runtimes doesn't justify the indirection.
 
 - Emitter registry (template-kind × runtime backend) instead of one
   monolithic module.
@@ -171,7 +183,19 @@ Make the rebuild measurable before changing behavior.
 - Structured TODOs with stable ids (`# TODO(A2P-107): ...`) the report can
   link to.
 
-### Phase 4 — Client-facing layer
+### Phase 4 — Client-facing layer ✅ complete
+
+> Status: the CLI now covers the full engagement journey. `assess` grades
+> every workflow (automatic / review / manual) by running the real conversion
+> in memory — grades cannot drift from converter behavior — and emits
+> Markdown + JSON + HTML fleet reports with a rough effort estimate (on the
+> upstream corpus: 217 workflows → 138 automatic / 58 review / 21 manual).
+> `convert` gained `--dry-run`, no-clobber-by-default (`--force` to
+> overwrite), and writes `MIGRATION_REPORT.md` — every `TODO(A2P-###)` as a
+> checklist with `file:line` anchors. `verify` imports each generated module
+> in a subprocess to prove the output loads. Docs rebuilt around
+> assess → convert → verify → deploy, plus `COVERAGE.md` (feature →
+> equivalent → status matrix that doubles as engagement collateral).
 
 - `argo2prefect assess ./manifests`: no code generated; fleet report with
   workflow count, feature histogram, per-workflow fidelity grade
