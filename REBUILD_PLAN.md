@@ -121,17 +121,40 @@ Make the rebuild measurable before changing behavior.
 - Shared templates emit as a shared Python module that per-workflow files
   import — mirroring how the client organized their Argo code.
 
-### Phase 2 — IR + parser v2
+### Phase 2 — IR + parser v2 ✅ complete
+
+> Status: corpus at **206/206** (zero known failures — the two `{{=expr}}`
+> invalid-code entries are fixed). New semantics: full `retryStrategy`
+> (retries + constant/exponential `retry_delay_seconds`, policy/cap flagged),
+> `activeDeadlineSeconds` → `timeout_seconds` (task, subflow, and main flow),
+> `onExit` → `on_completion`/`on_failure` state hooks, `synchronization`
+> mutex/semaphore → `with concurrency(...)` guards (+ instructions to create
+> the limit), `memoize` → `cache_policy=INPUTS` + `cache_expiration`,
+> `withSequence` → `.map()` over a generated sequence helper, `inline:`
+> templates hoisted into real named templates (the last Phase-1 corpus stubs
+> are gone), CronWorkflow multiple schedules + `suspend` (paused deployments,
+> `active: false` in prefect.yaml), and artifact storage identified
+> (s3/gcs/http/git/...) so TODOs carry the actual location.
+>
+> Expression engine: `{{= ...}}` expr-lang translation (references,
+> literals, asInt/asFloat/string, common sprig functions), Argo bare-word
+> comparison semantics (`== heads` → `== "heads"`), and a hard guarantee
+> that translated conditions are valid Python over known names — anything
+> else becomes an explicit `if False` with a warning instead of a syntax
+> error or a runtime NameError.
+>
+> Decision: the IR stays on lenient hand-rolled dataclasses rather than
+> Pydantic. Strict validation fights the "parse anything, warn precisely"
+> philosophy that the corpus rewards, and the assess-phase reporting needs
+> (precise, human-readable findings) are served by the warning system.
 
 - Model the missing semantics: `depends` expressions, `withSequence`, full
   `retryStrategy`, timeouts, `onExit`/hooks, `synchronization`, `memoize`,
   CronWorkflow extras (multiple schedules, `concurrencyPolicy`, `suspend`),
   artifact storage specs (S3/GCS/HTTP identified, not just counted).
-- Pydantic IR models: validation, precise error locations, self-documenting
-  schema.
 - A real tokenizer for `{{...}}` / `{{=...}}` expressions with a
   sprig-function translation table for the common cases; everything else
-  flagged with a stable TODO id.
+  flagged clearly.
 
 ### Phase 3 — Generator v2
 

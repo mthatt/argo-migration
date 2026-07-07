@@ -53,12 +53,54 @@ class Parameter:
 
 @dataclass
 class Artifact:
-    """An Argo artifact. We do not migrate artifact storage, but we track them
-    so the generator can warn about manual follow-up."""
+    """An Argo artifact. We do not migrate artifact storage, but we identify
+    where it lives so warnings and TODOs are specific enough to act on."""
 
     name: str
     path: str | None = None
     from_expression: str | None = None
+    # Storage backend ("s3", "gcs", "http", "git", "raw", ...) and a
+    # human-readable location like "bucket/key" or a URL, when declared.
+    storage: str | None = None
+    location: str | None = None
+
+
+@dataclass
+class SequenceSpec:
+    """A ``withSequence`` loop source. Values are strings and may contain
+    ``{{...}}`` expressions."""
+
+    count: str | None = None
+    start: str | None = None
+    end: str | None = None
+    format: str | None = None
+
+
+@dataclass
+class RetryPolicy:
+    """A template's ``retryStrategy`` in full."""
+
+    limit: int | None = None
+    policy: str | None = None  # OnFailure (default) / OnError / Always / ...
+    backoff_duration: str | None = None  # base delay, e.g. "1m"
+    backoff_factor: int | None = None  # exponential multiplier
+    backoff_max: str | None = None  # cap, e.g. "1h"
+
+
+@dataclass
+class Synchronization:
+    """A mutex or semaphore guard (template- or workflow-level)."""
+
+    kind: str  # "mutex" | "semaphore"
+    name: str
+
+
+@dataclass
+class Memoization:
+    """A template's ``memoize`` cache configuration."""
+
+    key: str = ""
+    max_age: str | None = None
 
 
 @dataclass
@@ -131,6 +173,9 @@ class Call:
     when: str | None = None
     with_items: list[Any] | None = None
     with_param: str | None = None
+    with_sequence: SequenceSpec | None = None
+    # Task/step-level exit hook template name (flagged, not yet generated).
+    on_exit: str | None = None
     # A step/task may invoke another workflow template instead of an inline one.
     # ``template_ref`` is the referenced WorkflowTemplate's name; ``template``
     # then names the template *inside* it.
@@ -163,10 +208,18 @@ class Template:
     # For kind == STEPS: an ordered list of parallel groups.
     step_groups: list[list[Call]] = field(default_factory=list)
 
-    # Retry / resource hints carried through for the generator.
-    retry_limit: int | None = None
+    # Behavioral knobs carried through for the generator.
+    retry: RetryPolicy | None = None
+    timeout_seconds: int | None = None  # activeDeadlineSeconds
+    synchronization: Synchronization | None = None
+    memoize: Memoization | None = None
 
     raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def retry_limit(self) -> int | None:
+        """Backward-compatible accessor for the plain retry count."""
+        return self.retry.limit if self.retry else None
 
     @property
     def is_composite(self) -> bool:
@@ -186,9 +239,17 @@ class Workflow:
     arguments: list[Parameter] = field(default_factory=list)
     templates: list[Template] = field(default_factory=list)
 
-    # Populated for CronWorkflow.
+    # Populated for CronWorkflow. ``schedule`` is the first schedule (kept for
+    # convenience); ``schedules`` carries all of them.
     schedule: str | None = None
+    schedules: list[str] = field(default_factory=list)
     timezone: str | None = None
+    suspended: bool = False
+
+    # Workflow-level behavior.
+    timeout_seconds: int | None = None  # spec.activeDeadlineSeconds
+    on_exit: str | None = None  # exit-handler template name
+    synchronization: Synchronization | None = None
 
     # Spec-level ``workflowTemplateRef``: the whole spec (entrypoint, templates)
     # comes from the named WorkflowTemplate; this manifest only overrides

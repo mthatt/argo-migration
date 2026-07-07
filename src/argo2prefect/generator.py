@@ -78,7 +78,9 @@ class DeploymentPlan:
     name: str
     flow_func: str
     schedule: str | None = None
+    schedules: list[str] = field(default_factory=list)
     timezone: str | None = None
+    suspended: bool = False
     parameters: dict[str, str] = field(default_factory=dict)
     entrypoint_file: str | None = None
 
@@ -346,7 +348,9 @@ def _generate_module(
                 name=wf.display_name,
                 flow_func=main_name,
                 schedule=wf.schedule,
+                schedules=list(wf.schedules),
                 timezone=wf.timezone,
+                suspended=wf.suspended,
                 parameters={
                     p.name: (p.value if p.value is not None else (p.default or ""))
                     for p in wf.arguments
@@ -380,10 +384,9 @@ def _emit_task(
     inputs = {p.name: sanitize_identifier(p.name) for p in template.inputs}
     scope = gen.base_scope(inputs)
 
-    decorator = f'@task(name="{template.name}"'
-    if template.retry_limit:
-        decorator += f", retries={template.retry_limit}"
-    decorator += ")"
+    args = [f'name="{template.name}"']
+    args += _behavior_decorator_args(template, gen)
+    decorator = f"@task({', '.join(args)})"
 
     code.add()
     code.add(decorator)
@@ -391,19 +394,100 @@ def _emit_task(
     doc = f"Argo template '{template.name}' ({template.kind.value})."
     code.add(f'"""{doc}"""', 1)
 
+    ind = _emit_artifact_todos(code, 1, template, gen)
+    ind = _emit_sync_guard(code, ind, template.synchronization, gen)
+
     kind = template.kind
     if kind == TemplateKind.CONTAINER and template.container is not None:
-        _emit_container_body(code, 1, template.container, scope, gen, template.name)
+        _emit_container_body(code, ind, template.container, scope, gen, template.name)
     elif kind == TemplateKind.SCRIPT and template.script is not None:
-        _emit_script_body(code, 1, template.script, scope, gen, template)
+        _emit_script_body(code, ind, template.script, scope, gen, template)
     elif kind == TemplateKind.RESOURCE and template.resource is not None:
-        _emit_resource_body(code, 1, template, scope, gen)
+        _emit_resource_body(code, ind, template, scope, gen)
     elif kind == TemplateKind.HTTP and template.http is not None:
-        _emit_http_body(code, 1, template, scope, gen)
+        _emit_http_body(code, ind, template, scope, gen)
     elif kind == TemplateKind.SUSPEND:
-        _emit_suspend_body(code, 1, template, gen)
+        _emit_suspend_body(code, ind, template, gen)
     else:
-        _emit_stub_body(code, 1, template, gen)
+        _emit_stub_body(code, ind, template, gen)
+
+
+def _behavior_decorator_args(template: Template, gen: _GenState) -> list[str]:
+    """Decorator arguments shared by tasks and (composite) flows: retries,
+    timeouts, and caching — the Argo semantics with direct Prefect knobs."""
+    args: list[str] = []
+    retry = template.retry
+    if retry and retry.limit:
+        args.append(f"retries={retry.limit}")
+        if retry.backoff_factor:
+            gen.imports.add("exponential_backoff")
+            base = _duration_to_seconds(retry.backoff_duration) or 1
+            args.append(f"retry_delay_seconds=exponential_backoff(backoff_factor={base})")
+            if retry.backoff_max:
+                gen.warnings.append(
+                    f"Template '{template.name}' caps retry backoff at "
+                    f"{retry.backoff_max}; Prefect's exponential_backoff has no cap — review."
+                )
+        elif retry.backoff_duration:
+            seconds = _duration_to_seconds(retry.backoff_duration)
+            if seconds:
+                args.append(f"retry_delay_seconds={seconds}")
+        if retry.policy and retry.policy != "OnFailure":
+            gen.warnings.append(
+                f"Template '{template.name}' uses retryPolicy '{retry.policy}'; Prefect "
+                "retries on any task failure — review if error/failure distinction matters."
+            )
+    if template.timeout_seconds:
+        args.append(f"timeout_seconds={template.timeout_seconds}")
+    if template.memoize:
+        gen.imports.add("INPUTS")
+        args.append("cache_policy=INPUTS")
+        max_age = _duration_to_seconds(template.memoize.max_age)
+        if max_age:
+            gen.imports.add("timedelta")
+            args.append(f"cache_expiration=timedelta(seconds={max_age})")
+        gen.warnings.append(
+            f"Template '{template.name}' memoize key '{template.memoize.key}' is "
+            "approximated with cache_policy=INPUTS (hashes ALL inputs); review."
+        )
+    return args
+
+
+def _emit_artifact_todos(code: _Code, ind: int, template: Template, gen: _GenState) -> int:
+    """Anchor artifact follow-up work in the task body, with the storage
+    location when the manifest declares one."""
+    for direction, artifacts in (
+        ("input", template.input_artifacts),
+        ("output", template.output_artifacts),
+    ):
+        for art in artifacts:
+            where = f" from {art.storage}://{art.location}" if art.storage else ""
+            path = f" at '{art.path}'" if art.path else ""
+            verb = "fetch it before the command runs" if direction == "input" else "publish it"
+            code.add(
+                f"# TODO(argo2prefect): {direction} artifact '{art.name}'{where}{path}; {verb}.",
+                ind,
+            )
+    if template.input_artifacts or template.output_artifacts:
+        gen.warnings.append(
+            f"Template '{template.name}' uses artifacts; storage wiring is left as "
+            "TODOs in the task body."
+        )
+    return ind
+
+
+def _emit_sync_guard(code: _Code, ind: int, sync, gen: _GenState) -> int:
+    """Open a Prefect concurrency guard for an Argo mutex/semaphore; returns
+    the body indent to use inside the guard."""
+    if sync is None:
+        return ind
+    gen.imports.add("concurrency")
+    code.add(f"with concurrency({json.dumps(sync.name)}):  # Argo {sync.kind}", ind)
+    gen.warnings.append(
+        f"Create the global concurrency limit '{sync.name}' before running "
+        f"(`prefect gcl create {sync.name} --limit <N>`); it guards an Argo {sync.kind}."
+    )
+    return ind + 1
 
 
 def _signature(template: Template, gen: _GenState) -> str:
@@ -628,11 +712,19 @@ def _emit_composite_flow(
     inputs = {p.name: sanitize_identifier(p.name) for p in template.inputs}
     scope = gen.base_scope(inputs)
 
+    args = [f'name="{template.name}"']
+    retry = template.retry
+    if retry and retry.limit:
+        args.append(f"retries={retry.limit}")
+    if template.timeout_seconds:
+        args.append(f"timeout_seconds={template.timeout_seconds}")
+
     code.add()
-    code.add(f'@flow(name="{template.name}")')
+    code.add(f"@flow({', '.join(args)})")
     code.add(f"def {func}({_signature(template, gen)}):")
     code.add(f'"""Argo {template.kind.value} template \'{template.name}\'."""', 1)
 
+    ind = _emit_sync_guard(code, 1, template.synchronization, gen)
     sync_calls = _composite_sync_calls(wf, template, func_of, gen)
 
     if template.kind == TemplateKind.DAG:
@@ -641,19 +733,19 @@ def _emit_composite_flow(
             prev = [
                 f"{sanitize_identifier(d)}_fut" for d in call.dependencies if d not in sync_calls
             ]
-            _emit_call(code, 1, wf, call, scope, func_of, gen, prev, sync_calls)
+            _emit_call(code, ind, wf, call, scope, func_of, gen, prev, sync_calls)
     else:  # STEPS
         prev_group: list[str] = []
         for group in template.step_groups:
             current: list[str] = []
             for call in group:
                 waits = [w for w in prev_group]
-                _emit_call(code, 1, wf, call, scope, func_of, gen, waits, sync_calls)
+                _emit_call(code, ind, wf, call, scope, func_of, gen, waits, sync_calls)
                 if call.name not in sync_calls:
                     current.append(f"{sanitize_identifier(call.name)}_fut")
             prev_group = current
 
-    code.add("return None", 1)
+    code.add("return None", ind)
 
 
 def _composite_sync_calls(
@@ -732,7 +824,7 @@ def _emit_call(
         code.add(f"if {cond}:  # TODO(argo2prefect): review translated condition", ind)
         body_ind = ind + 1
 
-    looped = call.with_items is not None or bool(call.with_param)
+    looped = call.with_items is not None or bool(call.with_param) or call.with_sequence is not None
     if looped and not is_sync:
         _emit_mapped_call(
             code, body_ind, call, target, target_func, scope, gen, wait_clause, fut_var
@@ -764,6 +856,21 @@ def _emit_mapped_call(
     gen.imports.add("unmapped")
     if call.with_items is not None:
         code.add(f"_items = {_py_literal(call.with_items)}", ind)
+    elif call.with_sequence is not None:
+        gen.helpers.add("sequence")
+        seq = call.with_sequence
+        seq_args = [
+            f"{field_name}={translate_value(value, scope)}"
+            for field_name, value in (
+                ("count", seq.count),
+                ("start", seq.start),
+                ("end", seq.end),
+            )
+            if value is not None
+        ]
+        if seq.format:
+            seq_args.append(f"fmt={json.dumps(seq.format)}")
+        code.add(f"_items = _argo_sequence({', '.join(seq_args)})", ind)
     else:
         gen.helpers.add("as_list")
         code.add(f"_items = _as_list({translate_value(call.with_param, scope)})", ind)
@@ -836,8 +943,18 @@ def _emit_main_flow(code: _Code, wf: Workflow, func_of: dict[str, str], gen: _Ge
         default = json.dumps(param.value if param.value is not None else (param.default or ""))
         params.append(f"{ident}: str = {default}")
 
+    hook_name = _emit_exit_hook(code, wf, func_of, gen, main_name)
+
+    flow_args = [f'name="{wf.display_name}"']
+    if wf.timeout_seconds:
+        flow_args.append(f"timeout_seconds={wf.timeout_seconds}")
+    if hook_name:
+        # Argo onExit runs on success AND failure; attach to both hooks.
+        flow_args.append(f"on_completion=[{hook_name}]")
+        flow_args.append(f"on_failure=[{hook_name}]")
+
     code.add()
-    code.add(f'@flow(name="{wf.display_name}")')
+    code.add(f"@flow({', '.join(flow_args)})")
     code.add(f"def {main_name}({', '.join(params)}):")
     code.add(f'"""Entry point for Argo {wf.kind} \'{wf.display_name}\'."""', 1)
 
@@ -852,10 +969,44 @@ def _emit_main_flow(code: _Code, wf: Workflow, func_of: dict[str, str], gen: _Ge
         code.add("return None", 1)
         return main_name
 
+    ind = _emit_sync_guard(code, 1, wf.synchronization, gen)
     entry, entry_func = resolved_entry
     kwargs = _entrypoint_kwargs(wf, entry)
-    code.add(f"return {entry_func}({kwargs})", 1)
+    code.add(f"return {entry_func}({kwargs})", ind)
     return main_name
+
+
+def _emit_exit_hook(
+    code: _Code, wf: Workflow, func_of: dict[str, str], gen: _GenState, main_name: str
+) -> str | None:
+    """Emit a state hook for the workflow's ``onExit`` handler, if any.
+
+    Returns the hook function's name, to be attached to the main flow's
+    ``on_completion`` and ``on_failure`` (Argo exit handlers run regardless
+    of outcome).
+    """
+    if not wf.on_exit:
+        return None
+    exit_template = wf.template_by_name(wf.on_exit)
+    if exit_template is None:
+        gen.warnings.append(
+            f"[{wf.display_name}] onExit handler '{wf.on_exit}' not found in this "
+            "manifest; wire a Prefect on_completion/on_failure hook manually."
+        )
+        return None
+    exit_func = func_of[exit_template.name]
+    hook_name = unique(f"_{main_name}_on_exit", gen.func_names)
+    code.add()
+    code.add(f"def {hook_name}(flow, flow_run, state):")
+    code.add(f'"""Argo onExit handler \'{wf.on_exit}\' (runs on success and failure)."""', 1)
+    if any(p.default is None for p in exit_template.inputs):
+        code.add(
+            "# TODO(argo2prefect): the exit template has required inputs; Argo passed",
+            1,
+        )
+        code.add("#   `{{workflow.*}}` context here — supply equivalents from `state`.", 1)
+    code.add(f"{exit_func}()", 1)
+    return hook_name
 
 
 def _resolve_entrypoint(
@@ -955,10 +1106,18 @@ def _build_header(gen: _GenState, wp_defaults: dict[str, str], workflows: list[W
     if "urllib" in gen.imports:
         code.add("import urllib.request")
 
+    if "timedelta" in gen.imports:
+        code.add("from datetime import timedelta")
     prefect_imports = ["flow", "task"]
     if "unmapped" in gen.imports:
         prefect_imports.append("unmapped")
     code.add(f"from prefect import {', '.join(prefect_imports)}")
+    if "INPUTS" in gen.imports:
+        code.add("from prefect.cache_policies import INPUTS")
+    if "concurrency" in gen.imports:
+        code.add("from prefect.concurrency.sync import concurrency")
+    if "exponential_backoff" in gen.imports:
+        code.add("from prefect.tasks import exponential_backoff")
     if gen.used_runtime:
         code.add(f"from prefect.runtime import {', '.join(sorted(gen.used_runtime))}")
     if "shell" in gen.imports:
@@ -982,6 +1141,9 @@ def _build_header(gen: _GenState, wp_defaults: dict[str, str], workflows: list[W
     if "as_list" in gen.helpers:
         code.add()
         code.add(_AS_LIST_HELPER.rstrip())
+    if "sequence" in gen.helpers:
+        code.add()
+        code.add(_SEQUENCE_HELPER.rstrip())
 
     return code.render()
 
@@ -998,9 +1160,17 @@ def _build_footer(gen: _GenState, served: list[tuple[Workflow, str]]) -> str:
             serve_args.append(f"cron={json.dumps(wf.schedule)}")
         if wf.timezone:
             serve_args.append(f"timezone={json.dumps(wf.timezone)}")
+        if wf.suspended:
+            serve_args.append("paused=True")
         code.add("import sys", 1)
         code.add()
         code.add('if "--serve" in sys.argv:', 1)
+        if wf.suspended:
+            code.add("# paused=True because the source CronWorkflow was suspended.", 2)
+        if len(wf.schedules) > 1:
+            extra = ", ".join(wf.schedules[1:])
+            code.add(f"# NOTE: the CronWorkflow had additional schedules ({extra});", 2)
+            code.add("#   serve() takes one cron — use prefect.yaml for the full set.", 2)
         code.add(f"{func}.serve({', '.join(serve_args)})", 2)
         code.add("else:", 1)
         code.add("# One-off local run with default parameters.", 2)
@@ -1143,4 +1313,15 @@ def _as_list(_value):
 
         return _json.loads(_value)
     return list(_value)
+'''
+
+_SEQUENCE_HELPER = '''
+def _argo_sequence(count=None, start=None, end=None, fmt=None):
+    """Expand an Argo `withSequence` into its list of string items."""
+    if count is not None:
+        _values = range(int(count))
+    else:
+        _s, _e = int(start or 0), int(end or 0)
+        _values = range(_s, _e + 1) if _e >= _s else range(_s, _e - 1, -1)
+    return [(fmt % _v) if fmt else str(_v) for _v in _values]
 '''
