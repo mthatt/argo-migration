@@ -28,7 +28,7 @@ def test_generated_code_compiles(example_text, name, runtime):
 def test_dag_structure(example_text):
     code = convert(example_text("dag-diamond.yaml"))
     assert '@task(name="echo")' in code
-    assert 'def diamond(' in code
+    assert "def diamond(" in code
     assert "wait_for=" in code
     assert "WORKFLOW_PARAMETERS['greeting']" in code
     assert ".submit(" in code
@@ -51,15 +51,20 @@ def test_no_serve_option(example_text):
     assert "__main__" not in code
 
 
-def test_kubernetes_runtime_emits_job_manifest(example_text):
+def test_kubernetes_runtime_uses_k8s_client(example_text):
     code = convert(example_text("cron-backup.yaml"), GeneratorOptions(runtime="kubernetes"))
-    assert '"kind": "Job"' in code
-    assert "kubectl apply" in code
+    assert "_run_k8s_job(" in code
+    assert "from kubernetes import client" in code
+    assert "delete_namespaced_job" in code  # jobs never leak
+    assert '"kubernetes>=29"' in code  # PEP 723 dep
 
 
-def test_docker_runtime_emits_docker_run(example_text):
+def test_docker_runtime_uses_docker_sdk(example_text):
     code = convert(example_text("steps-hello.yaml"), GeneratorOptions(runtime="docker"))
-    assert '"docker", "run", "--rm"' in code
+    assert "docker.from_env()" in code
+    assert "_client.containers.run(" in code
+    assert "remove=True" in code
+    assert '"docker>=7"' in code  # PEP 723 dep
 
 
 def test_invalid_runtime_rejected():
@@ -71,14 +76,15 @@ def test_pep723_metadata_present_by_default(example_text):
     code = convert(example_text("dag-diamond.yaml"))
     assert code.startswith("# /// script")
     assert '"prefect>=3,<4"' in code
-    # Shell-based flows also need prefect-shell at runtime.
-    assert '"prefect-shell>=0.3"' in code
+    # The default (docker) runtime needs the docker SDK.
+    assert '"docker>=7"' in code
+    # Shell-based flows need prefect-shell at runtime.
+    shell = convert(example_text("dag-diamond.yaml"), GeneratorOptions(runtime="shell"))
+    assert '"prefect-shell>=0.3"' in shell
 
 
 def test_pep723_metadata_can_be_disabled(example_text):
-    code = convert(
-        example_text("dag-diamond.yaml"), GeneratorOptions(script_metadata=False)
-    )
+    code = convert(example_text("dag-diamond.yaml"), GeneratorOptions(script_metadata=False))
     assert "# /// script" not in code
 
 

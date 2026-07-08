@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 
 class TemplateKind(str, Enum):
@@ -47,18 +47,60 @@ class Parameter:
     """
 
     name: str
-    value: Optional[str] = None
-    default: Optional[str] = None
+    value: str | None = None
+    default: str | None = None
 
 
 @dataclass
 class Artifact:
-    """An Argo artifact. We do not migrate artifact storage, but we track them
-    so the generator can warn about manual follow-up."""
+    """An Argo artifact. We do not migrate artifact storage, but we identify
+    where it lives so warnings and TODOs are specific enough to act on."""
 
     name: str
-    path: Optional[str] = None
-    from_expression: Optional[str] = None
+    path: str | None = None
+    from_expression: str | None = None
+    # Storage backend ("s3", "gcs", "http", "git", "raw", ...) and a
+    # human-readable location like "bucket/key" or a URL, when declared.
+    storage: str | None = None
+    location: str | None = None
+
+
+@dataclass
+class SequenceSpec:
+    """A ``withSequence`` loop source. Values are strings and may contain
+    ``{{...}}`` expressions."""
+
+    count: str | None = None
+    start: str | None = None
+    end: str | None = None
+    format: str | None = None
+
+
+@dataclass
+class RetryPolicy:
+    """A template's ``retryStrategy`` in full."""
+
+    limit: int | None = None
+    policy: str | None = None  # OnFailure (default) / OnError / Always / ...
+    backoff_duration: str | None = None  # base delay, e.g. "1m"
+    backoff_factor: int | None = None  # exponential multiplier
+    backoff_max: str | None = None  # cap, e.g. "1h"
+
+
+@dataclass
+class Synchronization:
+    """A mutex or semaphore guard (template- or workflow-level)."""
+
+    kind: str  # "mutex" | "semaphore"
+    name: str
+
+
+@dataclass
+class Memoization:
+    """A template's ``memoize`` cache configuration."""
+
+    key: str = ""
+    max_age: str | None = None
 
 
 @dataclass
@@ -69,7 +111,7 @@ class ContainerSpec:
     command: list[str] = field(default_factory=list)
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
-    working_dir: Optional[str] = None
+    working_dir: str | None = None
 
 
 @dataclass
@@ -104,15 +146,15 @@ class HTTPSpec:
     method: str = "GET"
     url: str = ""
     headers: dict[str, str] = field(default_factory=dict)
-    body: Optional[str] = None
-    success_condition: Optional[str] = None
+    body: str | None = None
+    success_condition: str | None = None
 
 
 @dataclass
 class SuspendSpec:
     """A ``suspend`` template that pauses the workflow."""
 
-    duration: Optional[str] = None
+    duration: str | None = None
 
 
 @dataclass
@@ -128,11 +170,20 @@ class Call:
     template: str
     arguments: list[Parameter] = field(default_factory=list)
     dependencies: list[str] = field(default_factory=list)
-    when: Optional[str] = None
-    with_items: Optional[list[Any]] = None
-    with_param: Optional[str] = None
+    when: str | None = None
+    with_items: list[Any] | None = None
+    with_param: str | None = None
+    with_sequence: SequenceSpec | None = None
+    # Task/step-level exit hook template name (flagged, not yet generated).
+    on_exit: str | None = None
     # A step/task may invoke another workflow template instead of an inline one.
-    template_ref: Optional[str] = None
+    # ``template_ref`` is the referenced WorkflowTemplate's name; ``template``
+    # then names the template *inside* it.
+    template_ref: str | None = None
+    # Raw ``depends`` expression (DAG tasks only). Dependency *edges* extracted
+    # from it are merged into ``dependencies``; status qualifiers / OR logic
+    # beyond "all upstream succeeded" are flagged for review by the generator.
+    depends: str | None = None
 
 
 @dataclass
@@ -146,21 +197,29 @@ class Template:
     outputs: list[Parameter] = field(default_factory=list)
     output_artifacts: list[Artifact] = field(default_factory=list)
 
-    container: Optional[ContainerSpec] = None
-    script: Optional[ScriptSpec] = None
-    resource: Optional[ResourceSpec] = None
-    http: Optional[HTTPSpec] = None
-    suspend: Optional[SuspendSpec] = None
+    container: ContainerSpec | None = None
+    script: ScriptSpec | None = None
+    resource: ResourceSpec | None = None
+    http: HTTPSpec | None = None
+    suspend: SuspendSpec | None = None
 
     # For kind == DAG.
     dag_tasks: list[Call] = field(default_factory=list)
     # For kind == STEPS: an ordered list of parallel groups.
     step_groups: list[list[Call]] = field(default_factory=list)
 
-    # Retry / resource hints carried through for the generator.
-    retry_limit: Optional[int] = None
+    # Behavioral knobs carried through for the generator.
+    retry: RetryPolicy | None = None
+    timeout_seconds: int | None = None  # activeDeadlineSeconds
+    synchronization: Synchronization | None = None
+    memoize: Memoization | None = None
 
     raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def retry_limit(self) -> int | None:
+        """Backward-compatible accessor for the plain retry count."""
+        return self.retry.limit if self.retry else None
 
     @property
     def is_composite(self) -> bool:
@@ -174,21 +233,35 @@ class Workflow:
 
     kind: str = "Workflow"
     name: str = "workflow"
-    generate_name: Optional[str] = None
-    namespace: Optional[str] = None
-    entrypoint: Optional[str] = None
+    generate_name: str | None = None
+    namespace: str | None = None
+    entrypoint: str | None = None
     arguments: list[Parameter] = field(default_factory=list)
     templates: list[Template] = field(default_factory=list)
 
-    # Populated for CronWorkflow.
-    schedule: Optional[str] = None
-    timezone: Optional[str] = None
+    # Populated for CronWorkflow. ``schedule`` is the first schedule (kept for
+    # convenience); ``schedules`` carries all of them.
+    schedule: str | None = None
+    schedules: list[str] = field(default_factory=list)
+    timezone: str | None = None
+    suspended: bool = False
+
+    # Workflow-level behavior.
+    timeout_seconds: int | None = None  # spec.activeDeadlineSeconds
+    on_exit: str | None = None  # exit-handler template name
+    synchronization: Synchronization | None = None
+
+    # Spec-level ``workflowTemplateRef``: the whole spec (entrypoint, templates)
+    # comes from the named WorkflowTemplate; this manifest only overrides
+    # arguments/metadata. Resolved by :mod:`argo2prefect.project`.
+    workflow_template_ref: str | None = None
+    cluster_workflow_template_ref: bool = False
 
     labels: dict[str, str] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
 
-    def template_by_name(self, name: str) -> Optional[Template]:
+    def template_by_name(self, name: str) -> Template | None:
         for template in self.templates:
             if template.name == name:
                 return template

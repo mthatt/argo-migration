@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Optional
 
 from .generator import DeploymentPlan
 
@@ -41,7 +40,7 @@ class DeployOptions:
 
     work_pool: str = "managed-pool"
     work_pool_type: str = MANAGED_POOL_TYPE
-    source_repo: Optional[str] = None
+    source_repo: str | None = None
     # The generator runtime, carried through only to warn when it cannot run on
     # the chosen work pool (e.g. docker/kubernetes work on Managed compute).
     runtime: str = "docker"
@@ -133,13 +132,15 @@ def _render_deployment(plan: DeploymentPlan, opts: DeployOptions) -> list[str]:
             "      job_variables:",
             f"        pip_packages: [{pkgs}]   # Managed installs these at run time",
         ]
-    if plan.schedule:
-        lines += [
-            "    schedules:",
-            f"      - cron: {_yaml_scalar(plan.schedule)}",
-        ]
-        if plan.timezone:
-            lines.append(f"        timezone: {_yaml_scalar(plan.timezone)}")
+    crons = plan.schedules or ([plan.schedule] if plan.schedule else [])
+    if crons:
+        lines.append("    schedules:")
+        for cron in crons:
+            lines.append(f"      - cron: {_yaml_scalar(cron)}")
+            if plan.timezone:
+                lines.append(f"        timezone: {_yaml_scalar(plan.timezone)}")
+            if plan.suspended:
+                lines.append("        active: false   # the source CronWorkflow was suspended")
     if plan.parameters:
         lines.append("    parameters:")
         for key, value in plan.parameters.items():
@@ -232,7 +233,7 @@ def render_deploy_md(plans: list[DeploymentPlan], opts: DeployOptions) -> str:
     # Runtime mismatch.
     if opts.runtime_needs_richer_pool:
         out += [
-            f"- [ ] **Runtime mismatch.** These flows were generated with `--runtime",
+            "- [ ] **Runtime mismatch.** These flows were generated with `--runtime",
             f"  {opts.runtime}`, which needs Docker/kubectl and will **not** run on the",
             "  default Managed pool. Switch to a matching pool (see above) before this",
             "  will actually execute.",

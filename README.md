@@ -48,25 +48,43 @@ pip install -e ".[dev,generated]"       # editable install + test/runtime deps
 
 Requires Python 3.9+.
 
-## Quick start
+## The migration journey
+
+A migration runs in four steps — **assess → convert → verify → deploy** — and
+the CLI has a command for each:
 
 ```bash
-# Convert a single manifest and print to stdout
-argo2prefect convert examples/argo/dag-diamond.yaml
+# 1. ASSESS: how big is this migration? No code is written. Every workflow is
+#    graded automatic / review / manual by running the real conversion
+#    pipeline in memory, with a fleet report in Markdown + JSON + HTML.
+argo2prefect assess ./argo-manifests -o ./assessment
 
-# Convert to a file, executing containers via `docker run`
-argo2prefect convert examples/argo/dag-diamond.yaml -o flow.py --runtime docker
-
-# Convert every *.yaml/*.yml in a directory into an output folder
+# 2. CONVERT: the directory is converted as ONE linked project — templateRef /
+#    workflowTemplateRef resolve across files, WorkflowTemplate manifests are
+#    emitted once into shared_templates.py, and MIGRATION_REPORT.md
+#    consolidates every remaining TODO with file:line anchors.
 argo2prefect convert ./argo-manifests -o ./prefect_flows
 
-# Convert AND emit a Prefect Cloud deployment config + runbook
-argo2prefect convert ./argo-manifests -o ./prefect_flows \
-  --emit-prefect-yaml --source-repo https://github.com/acme/flows
+# 3. VERIFY: prove every generated module imports before anyone runs it.
+argo2prefect verify ./prefect_flows
 
-# Inspect a manifest without generating code
-argo2prefect inspect examples/argo/cron-backup.yaml
+# 4. DEPLOY: emit a Prefect Cloud prefect.yaml + step-by-step runbook.
+argo2prefect convert ./argo-manifests -o ./prefect_flows --force \
+  --emit-prefect-yaml --source-repo https://github.com/acme/flows
 ```
+
+Also useful:
+
+```bash
+argo2prefect convert workflow.yaml                  # single manifest to stdout
+argo2prefect convert ./manifests -o ./flows --dry-run   # see what would be written
+argo2prefect inspect examples/argo/cron-backup.yaml # quick manifest summary
+```
+
+Existing output files are never overwritten unless you pass `--force`.
+
+See [COVERAGE.md](COVERAGE.md) for the full Argo-feature → Prefect-equivalent
+matrix and each feature's automation status.
 
 `inspect` prints a quick summary:
 

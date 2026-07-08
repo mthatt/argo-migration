@@ -24,7 +24,6 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Optional
 
 from .naming import sanitize_identifier
 
@@ -40,9 +39,11 @@ class Scope:
     # Workflow-level parameter name -> local Python identifier (flow scope).
     workflow_params: dict[str, str] = field(default_factory=dict)
     # Loop variable name when inside a withItems/withParam expansion.
-    item_var: Optional[str] = None
+    item_var: str | None = None
     # Collected as a side effect: runtime imports needed (e.g. "flow_run").
     used_runtime: set[str] = field(default_factory=set)
+    # Collected as a side effect: generated-module helpers needed.
+    helpers: set[str] = field(default_factory=set)
     # Collected as a side effect: human-readable notes about unresolved bits.
     warnings: list[str] = field(default_factory=list)
 
@@ -91,32 +92,50 @@ def translate_value(expr: str, scope: Scope) -> str:
 
 
 def translate_condition(when: str, scope: Scope) -> str:
-    """Best-effort translation of an Argo ``when`` expression to Python.
+    """Translate an Argo ``when`` expression to Python.
 
-    Argo and Python share ``==``/``!=``/``<``/``>``; we additionally map the
-    boolean operators. Regex (``=~``) and anything exotic is preserved and
-    flagged for manual review.
+    Argo compares interpolated strings, so bare words are string operands:
+    ``{{p}} == heads`` means ``p == "heads"`` — the bare word is quoted, not
+    left as a (dangling) Python name. Boolean operators and common expr-lang
+    (``{{= ...}}``) constructs are mapped. The result is **guaranteed to be a
+    valid Python expression over known names**: anything else becomes
+    ``False`` with a warning, so the generated module always parses and a
+    skipped gate is explicit rather than silently wrong.
     """
-    result = when
+    substitutions: list[str | None] = []
 
     def repl(match: re.Match) -> str:
-        resolved = _resolve(match.group(1).strip(), scope, embedded=True)
+        token = match.group(1).strip()
+        resolved = _resolve(token, scope, embedded=True)
         if resolved is None:
             scope.warnings.append(f"Unresolved condition expression '{match.group(0)}'.")
-            return match.group(0)
-        return resolved
+        substitutions.append(resolved)
+        return f"__A2P{len(substitutions) - 1}X__"
 
-    result = PLACEHOLDER_RE.sub(repl, result)
-    result = result.replace("&&", " and ").replace("||", " or ")
-    if "=~" in result:
+    work = PLACEHOLDER_RE.sub(repl, when.strip())
+    work = _map_operators(work)
+    work = _quote_bare_words(work)
+    for index, expr in enumerate(substitutions):
+        work = work.replace(f"__A2P{index}X__", expr if expr is not None else "__A2P_UNRESOLVED__")
+
+    if "=~" in when:
         scope.warnings.append(
             f"Condition uses regex match (=~): '{when}'. Rewrite with re.search() manually."
         )
-    return result.strip()
+    if not _compiles(work) or not _names_known(work, scope):
+        scope.warnings.append(
+            f"Condition '{when}' could not be translated to Python; the branch is "
+            "emitted as `if False` — port the gate manually."
+        )
+        return "False"
+    return work.strip()
 
 
-def _resolve(token: str, scope: Scope, *, embedded: bool) -> Optional[str]:
+def _resolve(token: str, scope: Scope, *, embedded: bool) -> str | None:
     """Map a single ``{{ token }}`` body to a Python expression, or ``None``."""
+    if token.startswith("="):
+        # ``{{= ...}}`` is an expr-lang expression, not a plain reference.
+        return _translate_expr_lang(token[1:].strip(), scope)
     if token.startswith("inputs.parameters."):
         name = token[len("inputs.parameters.") :]
         return scope.inputs.get(name, sanitize_identifier(name))
@@ -128,6 +147,20 @@ def _resolve(token: str, scope: Scope, *, embedded: bool) -> Optional[str]:
         return scope.workflow_params.get(name, f"WORKFLOW_PARAMETERS['{escaped}']")
     if token.startswith("tasks.") or token.startswith("steps."):
         parts = token.split(".")
+        if len(parts) >= 5 and parts[2] == "outputs" and parts[3] == "parameters":
+            # Named output parameters came from files (valueFrom); only stdout
+            # is captured, so route through a loud helper instead of silently
+            # substituting the wrong value.
+            scope.helpers.add("output_param")
+            param = ".".join(parts[4:])
+            scope.warnings.append(
+                f"'{token}': named output parameters are not migrated automatically "
+                "(only stdout); the generated _argo_output_param() raises until mapped."
+            )
+            var = scope.output_var(parts[1])
+            return f"_argo_output_param({var}.result(), {param!r})"
+        if len(parts) >= 4 and parts[2] == "outputs" and parts[3] not in ("result",):
+            return None  # exitCode / artifacts / ... — no faithful mapping.
         if len(parts) >= 2:
             var = scope.output_var(parts[1])
             return f"{var}.result()" if embedded else var
@@ -135,7 +168,7 @@ def _resolve(token: str, scope: Scope, *, embedded: bool) -> Optional[str]:
     if token == "item":
         return scope.item_var or "item"
     if token.startswith("item."):
-        return f"{scope.item_var or 'item'}['{token[len('item.'):]}']"
+        return f"{scope.item_var or 'item'}['{token[len('item.') :]}']"
     if token == "workflow.name":
         scope.used_runtime.add("flow_run")
         return "flow_run.name"
@@ -143,6 +176,153 @@ def _resolve(token: str, scope: Scope, *, embedded: bool) -> Optional[str]:
         scope.used_runtime.add("flow_run")
         return "flow_run.id"
     return None
+
+
+# --------------------------------------------------------------------------- #
+# expr-lang (``{{= ...}}``) translation
+# --------------------------------------------------------------------------- #
+# Subscript references: inputs.parameters['x'] / workflow.parameters["y"].
+_EXPR_SUBSCRIPT = re.compile(r"(inputs|workflow)\.parameters\[(['\"])(.+?)\2\]")
+# Dotted references: inputs.parameters.x (name may contain dashes).
+_EXPR_DOTTED = re.compile(r"(inputs|workflow)\.parameters\.([A-Za-z_][A-Za-z0-9_\-]*)")
+
+#: expr-lang / sprig functions with direct Python builtins.
+_EXPR_FUNCS = {
+    "asInt": "int",
+    "asFloat": "float",
+    "string": "str",
+    "sprig.trim": "str.strip",
+    "sprig.lower": "str.lower",
+    "sprig.upper": "str.upper",
+}
+
+
+def _translate_expr_lang(expr: str, scope: Scope) -> str | None:
+    """Best-effort translation of an expr-lang expression to Python.
+
+    Handles parameter references (dotted and subscripted), the shared
+    comparison operators, boolean operators, and a few common conversion
+    functions. Returns ``None`` when the result would not be valid Python,
+    so callers fall back to their safe path (literal string / ``False``).
+    """
+
+    def sub_ref(scope_name: str, param: str) -> str:
+        if scope_name == "inputs":
+            return scope.inputs.get(param, sanitize_identifier(param))
+        escaped = param.replace("\\", "\\\\").replace("'", "\\'")
+        return scope.workflow_params.get(param, f"WORKFLOW_PARAMETERS['{escaped}']")
+
+    result = _EXPR_SUBSCRIPT.sub(lambda m: sub_ref(m.group(1), m.group(3)), expr)
+    result = _EXPR_DOTTED.sub(lambda m: sub_ref(m.group(1), m.group(2)), result)
+    if scope.item_var:
+        result = re.sub(r"\bitem\b", scope.item_var, result)
+    for name, py in _EXPR_FUNCS.items():
+        result = result.replace(f"{name}(", f"{py}(")
+    result = _map_literals(result)
+    result = _map_operators(result).strip()
+    if not _compiles(result) or not _names_known(result, scope):
+        return None
+    return result
+
+
+def _map_operators(text: str) -> str:
+    """Map expr-lang boolean operators onto Python's."""
+
+    def map_segment(segment: str) -> str:
+        segment = segment.replace("&&", " and ").replace("||", " or ")
+        # `!x` -> `not x`, but leave `!=` alone.
+        segment = re.sub(r"!(?!=)", " not ", segment)
+        return re.sub(r"  +", " ", segment)
+
+    parts = _QUOTED_SEGMENT.split(text)
+    return "".join(map_segment(part) if i % 2 == 0 else part for i, part in enumerate(parts))
+
+
+_LITERALS = {"true": "True", "false": "False", "nil": "None"}
+
+
+def _map_literals(text: str) -> str:
+    """Map expr-lang literals to Python's, outside quoted strings only."""
+
+    def map_words(segment: str) -> str:
+        return re.sub(r"\b(true|false|nil)\b", lambda m: _LITERALS[m.group(1)], segment)
+
+    parts = _QUOTED_SEGMENT.split(text)
+    return "".join(map_words(part) if i % 2 == 0 else part for i, part in enumerate(parts))
+
+
+def _compiles(expr: str) -> bool:
+    try:
+        compile(expr, "<argo-expression>", "eval")
+    except (SyntaxError, ValueError):
+        return False
+    return True
+
+
+_QUOTED_SEGMENT = re.compile(r"('[^']*'|\"[^\"]*\")")
+_BARE_WORD = re.compile(r"\b[A-Za-z_][\w\-]*\b")
+_SENTINEL = re.compile(r"__A2P\d+X__")
+_PY_KEYWORDS = {"and", "or", "not", "in", "is", "True", "False", "None"}
+
+#: Names allowed to appear in a translated expression, beyond scope-derived
+#: identifiers: the shared parameter dict, mapped conversion functions,
+#: Prefect runtime handles, and generated-module helpers.
+_KNOWN_NAMES = {
+    "WORKFLOW_PARAMETERS",
+    "int",
+    "float",
+    "str",
+    "len",
+    "flow_run",
+    "task_run",
+    "_argo_output_param",
+    "_argo_sequence",
+}
+
+_FUT_NAME = re.compile(r"\w+_fut$")
+
+
+def _quote_bare_words(text: str) -> str:
+    """Quote bare-word operands (Argo compares strings): ``== heads`` -> ``== "heads"``.
+
+    Quoted segments, Python keywords, and substitution sentinels are left
+    untouched.
+    """
+
+    def quote_words(segment: str) -> str:
+        def quote(match: re.Match) -> str:
+            word = match.group(0)
+            if word in _PY_KEYWORDS or _SENTINEL.fullmatch(word):
+                return word
+            return json.dumps(word)
+
+        return _BARE_WORD.sub(quote, segment)
+
+    parts = _QUOTED_SEGMENT.split(text)
+    # Even indices are outside quotes; odd indices are quoted segments.
+    return "".join(quote_words(part) if i % 2 == 0 else part for i, part in enumerate(parts))
+
+
+def _names_known(expr: str, scope: Scope) -> bool:
+    """True when every free name in ``expr`` is one we deliberately emitted.
+
+    This is the guard against expressions that *compile* but would raise
+    ``NameError`` at run time (e.g. untranslated ``jsonpath(...)``).
+    """
+    import ast
+
+    allowed = _KNOWN_NAMES | set(scope.inputs.values()) | set(scope.workflow_params.values())
+    if scope.item_var:
+        allowed.add(scope.item_var)
+    try:
+        tree = ast.parse(expr, mode="eval")
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            if node.id not in allowed and not _FUT_NAME.fullmatch(node.id):
+                return False
+    return True
 
 
 def _segments(text: str) -> list[tuple[str, str]]:

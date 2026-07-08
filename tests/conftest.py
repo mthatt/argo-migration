@@ -17,7 +17,9 @@ import pytest
 _PREFECT_HOME = tempfile.mkdtemp(prefix="argo2prefect-tests-")
 os.environ.setdefault("PREFECT_HOME", _PREFECT_HOME)
 os.environ.setdefault("PREFECT_LOGGING_LEVEL", "ERROR")
-os.environ.setdefault("PREFECT_API_DATABASE_CONNECTION_URL", f"sqlite+aiosqlite:///{_PREFECT_HOME}/prefect.db")
+os.environ.setdefault(
+    "PREFECT_API_DATABASE_CONNECTION_URL", f"sqlite+aiosqlite:///{_PREFECT_HOME}/prefect.db"
+)
 
 EXAMPLES_DIR = Path(__file__).resolve().parents[1] / "examples" / "argo"
 

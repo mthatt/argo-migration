@@ -1,0 +1,7 @@
+{
+  "argo-examples/configmaps_simple-parameters-configmap.yaml": "not-a-workflow",
+  "argo-examples/testvolume.yaml": "not-a-workflow",
+  "argo-examples/workflow-count-resourcequota.yaml": "not-a-workflow",
+  "argo-examples/workflow-event-binding_event-consumer-workfloweventbinding.yaml": "not-a-workflow",
+  "argo-examples/workflow-event-binding_github-path-filter-workfloweventbinding.yaml": "not-a-workflow"
+}
