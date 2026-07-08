@@ -10,6 +10,19 @@ parallel steps, loops, parameters, schedules, retries and all. Where Argo has no
 faithful Prefect equivalent, the tool emits a clear `# TODO` and a warning rather
 than guessing, so you always know what still needs a human.
 
+## Get started in one command
+
+No install step. [`uv`](https://docs.astral.sh/uv/) downloads `argo2prefect`
+into an isolated, throwaway environment and runs it:
+
+```bash
+uvx argo2prefect assess ./your-argo-manifests
+```
+
+That's a full fleet assessment — automatic/review/manual grades for every
+workflow — with nothing installed on your machine. Every command in this
+README works the same way: just put `uvx` in front.
+
 ---
 
 ## Why
@@ -25,36 +38,43 @@ breakdown for your own fleet.
 
 ## Installation
 
-> **Not yet on PyPI** — the first release (v0.2.0) is staged but not
-> published. Until it lands, install from this repository.
-
-From this repository (works today; [`uv`](https://docs.astral.sh/uv/)
-bootstraps Python and the env for you):
+The lowest-friction way is [`uv`](https://docs.astral.sh/uv/) — no venv, no
+`pip install`, and it bootstraps Python for you:
 
 ```bash
-# Run without installing anything, straight from git:
-uvx --from git+https://github.com/mthatt/argo2prefect argo2prefect assess ./argo-manifests
-
-# Or from a local checkout:
-uvx --from . argo2prefect --help
-pip install -e ".[dev,generated]"       # editable install + test/runtime deps
+uvx argo2prefect assess ./argo-manifests    # run it, install nothing (recommended)
+uv tool install argo2prefect                # or install it once as a persistent CLI
 ```
 
-Once v0.2.0 is on PyPI, this becomes:
+Prefer `pip`/`pipx`? Both work too:
 
 ```bash
-uvx argo2prefect assess ./argo-manifests   # zero-install (recommended)
-uv tool install argo2prefect               # persistent CLI
-pipx install argo2prefect                  # pip-world equivalent
-pip install argo2prefect                   # into the current environment
+pipx install argo2prefect          # isolated CLI
+pip install argo2prefect           # into the current environment
 ```
 
 Requires Python 3.10+.
 
+<details>
+<summary>Installing from source (contributing, or trying unreleased changes)</summary>
+
+```bash
+git clone https://github.com/mthatt/argo2prefect
+cd argo2prefect
+uvx --from . argo2prefect --help        # run straight from a checkout
+pip install -e ".[dev,generated]"       # editable install + test/runtime deps
+
+# Or the latest main branch, with no local checkout at all:
+uvx --from git+https://github.com/mthatt/argo2prefect argo2prefect --help
+```
+
+</details>
+
 ## The migration journey
 
 A migration runs in four steps — **assess → convert → verify → deploy** — and
-the CLI has a command for each:
+the CLI has a command for each. (Commands below assume `argo2prefect` is
+installed; put `uvx` in front of any of them to run with no install at all.)
 
 ```bash
 # 1. ASSESS: how big is this migration? No code is written. Every workflow is

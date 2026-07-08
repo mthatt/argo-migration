@@ -209,14 +209,16 @@ Make the rebuild measurable before changing behavior.
   a feature-coverage matrix (Argo feature → Prefect equivalent → automation
   status) that doubles as engagement collateral.
 
-### Phase 5 — Release 🚧 in progress
+### Phase 5 — Release ✅ complete (v0.2.0 published)
 
-> Status: version 0.2.0, `CHANGELOG.md` (Keep-a-Changelog format), and a
-> tag-triggered release workflow (`release.yml`) that gates publish on the
-> test suite and uses PyPI Trusted Publishing — no token in the repo. A
-> release-hygiene test keeps `pyproject.toml`, `__init__.__version__`, and
-> the changelog in agreement. Remaining: the one-time PyPI trusted-publisher
-> registration (account-holder action), versioned docs, examples gallery.
+> Status: `argo2prefect` 0.2.0 is live on PyPI
+> (https://pypi.org/project/argo2prefect/), published via the tag-triggered
+> `release.yml` (tests gate the build; PyPI Trusted Publishing / OIDC — no
+> token in the repo). `CHANGELOG.md` (Keep-a-Changelog format) and a
+> release-hygiene test keep `pyproject.toml`, `__init__.__version__`, and the
+> changelog in agreement. The README leads with the now-real `uvx
+> argo2prefect` zero-install command. Remaining, optional polish: versioned
+> docs, an examples gallery.
 
 - PyPI publish workflow, changelog, versioned docs, examples gallery.
 
