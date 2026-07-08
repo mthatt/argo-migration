@@ -209,7 +209,14 @@ Make the rebuild measurable before changing behavior.
   a feature-coverage matrix (Argo feature → Prefect equivalent → automation
   status) that doubles as engagement collateral.
 
-### Phase 5 — Release
+### Phase 5 — Release 🚧 in progress
+
+> Status: version 0.2.0, `CHANGELOG.md` (Keep-a-Changelog format), and a
+> tag-triggered release workflow (`release.yml`) that gates publish on the
+> test suite and uses PyPI Trusted Publishing — no token in the repo. A
+> release-hygiene test keeps `pyproject.toml`, `__init__.__version__`, and
+> the changelog in agreement. Remaining: the one-time PyPI trusted-publisher
+> registration (account-holder action), versioned docs, examples gallery.
 
 - PyPI publish workflow, changelog, versioned docs, examples gallery.
 

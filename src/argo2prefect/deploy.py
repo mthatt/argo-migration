@@ -17,7 +17,8 @@ Design notes
 * The default work pool is **Prefect Managed** (``prefect:managed``): Prefect
   hosts the compute, so the client runs no worker and no infrastructure. It is
   the fastest way to a first green run — but it has resource/time limits and
-  cannot run Docker or ``kubectl``, so we loudly encourage switching to a pool
+  cannot reach a Docker daemon or a Kubernetes cluster, so we loudly encourage
+  switching to a pool
   that matches the workload once things work.
 * A remote worker can only run code it can fetch. If ``--source-repo`` is given
   we emit a ``git_clone`` pull step; otherwise we fall back to a local working
@@ -104,7 +105,7 @@ def render_prefect_yaml(plans: list[DeploymentPlan], opts: DeployOptions) -> str
         "#",
         "# RECOMMENDED NEXT STEP: once a run succeeds, switch each deployment below to a",
         "# work pool that matches the workload. Managed compute has CPU/memory/time",
-        "# limits and cannot run Docker or kubectl. Better fits:",
+        "# limits and no Docker daemon or Kubernetes cluster access. Better fits:",
         "#   * kubernetes pool (+ an in-cluster worker)          - closest to Argo",
         "#   * ecs:push / cloud-run:push / azure-container-instance:push - serverless",
         "#         containers, still no worker to host (needs a cloud-credentials block)",
@@ -206,8 +207,8 @@ def render_deploy_md(plans: list[DeploymentPlan], opts: DeployOptions) -> str:
         "## After it works: pick the right work pool",
         "",
         "Prefect Managed is the fastest way to see runs, but it has CPU/memory/time",
-        "limits and **cannot run Docker or kubectl**. For anything beyond light",
-        "Python, replace it with a pool that matches your workload:",
+        "limits and **no Docker daemon or Kubernetes cluster access**. For anything",
+        "beyond light Python, replace it with a pool that matches your workload:",
         "",
         "- **Kubernetes** pool (+ an in-cluster worker) — closest to how Argo ran.",
         "- **ECS / Cloud Run / Azure Container Instances push** pool — serverless",
@@ -234,9 +235,9 @@ def render_deploy_md(plans: list[DeploymentPlan], opts: DeployOptions) -> str:
     if opts.runtime_needs_richer_pool:
         out += [
             "- [ ] **Runtime mismatch.** These flows were generated with `--runtime",
-            f"  {opts.runtime}`, which needs Docker/kubectl and will **not** run on the",
-            "  default Managed pool. Switch to a matching pool (see above) before this",
-            "  will actually execute.",
+            f"  {opts.runtime}`, which needs a Docker daemon / Kubernetes API access and",
+            "  will **not** run on the default Managed pool. Switch to a matching pool",
+            "  (see above) before this will actually execute.",
         ]
     out += [
         "",
