@@ -48,9 +48,9 @@ generated = [
 argo2prefect = "argo2prefect.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/mthatt/argo-migration"
-Repository = "https://github.com/mthatt/argo-migration"
-Issues = "https://github.com/mthatt/argo-migration/issues"
+Homepage = "https://github.com/mthatt/argo2prefect"
+Repository = "https://github.com/mthatt/argo2prefect"
+Issues = "https://github.com/mthatt/argo2prefect/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]

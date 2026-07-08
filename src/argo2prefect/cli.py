@@ -191,9 +191,17 @@ def _cmd_convert(args: argparse.Namespace) -> int:
         if args.dry_run:
             print(f"[dry-run] would write {out_path}", file=sys.stderr)
             return 0
-        if out_path.exists() and not args.force:
+        existing = [p for p in (out_path,) if p.exists()]
+        if args.emit_prefect_yaml:
+            existing += [
+                p
+                for p in (out_path.parent / "prefect.yaml", out_path.parent / "DEPLOY.md")
+                if p.exists()
+            ]
+        if existing and not args.force:
+            listing = ", ".join(str(p) for p in existing)
             print(
-                f"error: {out_path} already exists; pass --force to overwrite.",
+                f"error: {listing} already exist(s); pass --force to overwrite.",
                 file=sys.stderr,
             )
             return 2
@@ -241,7 +249,10 @@ def _convert_directory(src: Path, args: argparse.Namespace, options: GeneratorOp
             print(f"[dry-run] would write {out_dir / 'prefect.yaml'} + DEPLOY.md", file=sys.stderr)
         return 0
 
-    clobbered = [f for f in out.files if (out_dir / f).exists()]
+    planned = list(out.files) + ["MIGRATION_REPORT.md"]
+    if args.emit_prefect_yaml:
+        planned += ["prefect.yaml", "DEPLOY.md"]
+    clobbered = [f for f in planned if (out_dir / f).exists()]
     if clobbered and not args.force:
         listing = ", ".join(clobbered[:5]) + ("..." if len(clobbered) > 5 else "")
         print(

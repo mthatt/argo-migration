@@ -63,7 +63,7 @@ table and the tool cannot drift apart.
 | CronWorkflow `schedule(s)` + `timezone` | deployment schedules in `prefect.yaml` | ✅ |
 | CronWorkflow `suspend` | `paused=True` / `active: false` schedules | ✅ |
 | CronWorkflow `concurrencyPolicy` / `startingDeadlineSeconds` | flagged | 🔍 |
-| artifacts (s3/gcs/azure/http/git/…) | identified with location, anchored TODOs | ✋ A2P-103/104 |
+| artifacts (s3/gcs/azure/http/git/…) | identified with location, anchored TODOs (task still runs) | 🔍 A2P-103/104 |
 | volumes / volumeClaimTemplates | work-pool infrastructure concern | 🔍 |
 | secret/configmap env (`valueFrom`) | flagged marker | 🔍 |
 
