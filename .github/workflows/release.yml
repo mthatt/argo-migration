@@ -4,7 +4,7 @@ name: Release
 #
 # Auth is PyPI Trusted Publishing (OIDC) — no token stored in this repo.
 # One-time setup on pypi.org: Account → Publishing → add a pending publisher
-# for project "argo2prefect", repo "mthatt/argo-migration",
+# for project "argo2prefect", repo "mthatt/argo2prefect",
 # workflow "release.yml", environment "pypi".
 #
 # Release procedure:

@@ -17,33 +17,36 @@ than guessing, so you always know what still needs a human.
 Argo Workflows are declared in Kubernetes YAML and run as pods. Prefect flows are
 plain Python, run anywhere, and come with first-class observability, retries,
 caching and a UI. Moving a large fleet of Argo manifests by hand is slow and
-error-prone. This tool does 80–90% of the work and flags the rest.
+error-prone. This tool automates the bulk of it and flags the rest: on the
+official argo-workflows examples (217 workflows), 138 convert with no follow-up
+at all, 58 convert fully with items flagged for review, and 21 contain
+constructs that need a human — run `argo2prefect assess` to get the same
+breakdown for your own fleet.
 
 ## Installation
 
-The lowest-friction way is [`uv`](https://docs.astral.sh/uv/) — no manual venv,
-and it bootstraps Python for you:
+> **Not yet on PyPI** — the first release (v0.2.0) is staged but not
+> published. Until it lands, install from this repository.
+
+From this repository (works today; [`uv`](https://docs.astral.sh/uv/)
+bootstraps Python and the env for you):
 
 ```bash
-# Run it without installing anything (recommended):
-uvx argo2prefect assess ./argo-manifests
+# Run without installing anything, straight from git:
+uvx --from git+https://github.com/mthatt/argo2prefect argo2prefect assess ./argo-manifests
 
-# Or install it as a persistent CLI tool:
-uv tool install argo2prefect
-```
-
-Prefer `pip`/`pipx`? Both work too:
-
-```bash
-pipx install argo2prefect          # isolated CLI
-pip install argo2prefect           # into the current environment
-```
-
-From source (this repo):
-
-```bash
-uvx --from . argo2prefect --help        # run straight from a checkout
+# Or from a local checkout:
+uvx --from . argo2prefect --help
 pip install -e ".[dev,generated]"       # editable install + test/runtime deps
+```
+
+Once v0.2.0 is on PyPI, this becomes:
+
+```bash
+uvx argo2prefect assess ./argo-manifests   # zero-install (recommended)
+uv tool install argo2prefect               # persistent CLI
+pipx install argo2prefect                  # pip-world equivalent
+pip install argo2prefect                   # into the current environment
 ```
 
 Requires Python 3.10+.
@@ -100,10 +103,10 @@ CronWorkflow: nightly-backup
 ### Running the generated flow
 
 Every generated file carries a [PEP 723](https://peps.python.org/pep-0723/)
-header listing exactly what it needs (Prefect, plus the Docker or Kubernetes
-SDK depending on `--runtime`), so it is **self-bootstrapping** — `uv` reads
-it, installs the deps into an isolated env, and runs the flow. No
-`pip install` step:
+header listing exactly what it needs — Prefect, plus the dependency for the
+chosen `--runtime` (`docker`, `kubernetes`, or `prefect-shell`) — so it is
+**self-bootstrapping**: `uv` reads it, installs the deps into an isolated
+env, and runs the flow. No `pip install` step:
 
 ```bash
 uv run flow.py            # one-off local run (uses default parameters)

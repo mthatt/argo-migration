@@ -5,7 +5,7 @@ All notable changes to `argo2prefect`. The format follows
 [SemVer](https://semver.org/) (0.x: minor bumps may include breaking changes,
 called out explicitly).
 
-## [0.2.0] — 2026-07-07
+## [0.2.0] — 2026-07-08
 
 First public release: the v2 rebuild (see `REBUILD_PLAN.md`).
 
