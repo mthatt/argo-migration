@@ -100,18 +100,21 @@ CronWorkflow: nightly-backup
 ### Running the generated flow
 
 Every generated file carries a [PEP 723](https://peps.python.org/pep-0723/)
-header, so it is **self-bootstrapping** — `uv` reads it, installs Prefect into an
-isolated env, and runs the flow. No `pip install` step:
+header listing exactly what it needs (Prefect, plus the Docker or Kubernetes
+SDK depending on `--runtime`), so it is **self-bootstrapping** — `uv` reads
+it, installs the deps into an isolated env, and runs the flow. No
+`pip install` step:
 
 ```bash
 uv run flow.py            # one-off local run (uses default parameters)
 uv run flow.py --serve    # deploy on the workflow's schedule (Prefect worker)
 ```
 
-Without `uv`, install the runtime deps yourself and use plain Python:
+Without `uv`, install the deps from the file's PEP 723 header yourself, e.g.
+for the default docker runtime:
 
 ```bash
-pip install "prefect>=3,<4" prefect-shell
+pip install "prefect>=3,<4" "docker>=7"
 python flow.py            # one-off run;  add --serve to deploy on a schedule
 ```
 
@@ -161,9 +164,9 @@ The flows now appear in the Prefect Cloud UI, each on its schedule.
 The default work pool type is **Prefect Managed** (`prefect:managed`): Prefect
 hosts the compute, so your client stands up **no worker and no infrastructure** —
 the fastest path to a first green run. Managed compute has CPU/memory/time
-limits, though, and **cannot run Docker or `kubectl`**, so both `prefect.yaml`
-and `DEPLOY.md` explicitly encourage switching to a pool that matches the
-workload once things work:
+limits, though, and has **no Docker daemon or Kubernetes cluster access**, so
+both `prefect.yaml` and `DEPLOY.md` explicitly encourage switching to a pool
+that matches the workload once things work:
 
 | Workload | Recommended pool | Worker/infra |
 | -------- | ---------------- | ------------ |
@@ -191,35 +194,45 @@ it, `prefect.yaml` falls back to a local directory and both files flag — with 
 Argo runs every template in a container on Kubernetes. When generating Prefect
 code you choose how that work should execute with `--runtime`:
 
-| Runtime              | How container/script templates run                                  | Needs                |
+| Runtime              | How container/script templates run                                  | Needs on the worker  |
 | -------------------- | ------------------------------------------------------------------- | -------------------- |
-| `docker` *(default)* | `docker run --rm <image> <cmd>` via `prefect-shell`                 | Docker on the worker |
-| `shell`              | the command/script runs directly on the Prefect worker host        | the interpreter/CLI on PATH |
-| `kubernetes`         | renders a Kubernetes `Job` manifest and `kubectl apply`/`wait`/`logs` | `kubectl` + cluster access |
+| `docker` *(default)* | Docker SDK: `containers.run(...)` with env, auto-remove, combined logs | a Docker daemon |
+| `shell`              | the command/script runs directly on the Prefect worker host (image ignored) | the interpreter/CLI on PATH |
+| `kubernetes`         | official Kubernetes client: a `Job` is created, polled to completion, logs returned, and **always deleted** | kubeconfig or in-cluster credentials |
 
-`resource` templates always use `kubectl`, `http` templates use Python's stdlib
-`urllib`, and `suspend` templates map to `time.sleep` (fixed duration) or a
-`# TODO` for indefinite pauses.
+The kubernetes runtime reads its namespace from `$A2P_NAMESPACE` (default
+`default`). `resource` templates always use `kubectl`, `http` templates use
+Python's stdlib `urllib`, and `suspend` templates map to `time.sleep` (fixed
+duration) or a `# TODO` for indefinite pauses.
 
 ## Mapping reference
+
+The highlights (the complete matrix with per-feature automation status is
+[COVERAGE.md](COVERAGE.md)):
 
 | Argo concept                                   | Prefect output                                              |
 | ---------------------------------------------- | ----------------------------------------------------------- |
 | `container` / `script` / `resource` / `http`   | `@task` function                                            |
 | `dag` / `steps` template                       | `@flow` subflow                                             |
 | `spec.entrypoint`                              | top-level `@flow` (the served deployment)                   |
-| `dag.tasks[].dependencies`                     | `.submit()` + `wait_for=[...]`                              |
+| `dag.tasks[].dependencies` / `depends`         | `.submit()` + `wait_for=[...]` (status gates flagged)       |
+| `templateRef` / `workflowTemplateRef`          | import from the generated `shared_templates.py`             |
 | `steps` (list of groups)                       | sequential groups, parallel `.submit()` within a group      |
-| `withItems` / `withParam`                      | `.map()` / `unmapped(...)`                                  |
-| `when`                                         | `if` guard (flagged for review)                             |
+| `withItems` / `withParam` / `withSequence`     | `.map()` / `unmapped(...)`                                  |
+| `when` (incl. `{{= expr-lang }}`)              | `if` guard (flagged for review)                             |
 | `inputs.parameters`                            | task/flow function arguments                                |
-| `arguments.parameters` (workflow-level)        | main flow parameters + shared `WORKFLOW_PARAMETERS` dict     |
+| `arguments.parameters` (workflow-level)        | typed main-flow parameters + shared `WORKFLOW_PARAMETERS` dict |
 | `{{inputs.parameters.x}}`                      | the local `x` argument                                      |
 | `{{workflow.parameters.x}}`                    | `WORKFLOW_PARAMETERS['x']`                                   |
 | `{{tasks.X.outputs.result}}`                   | upstream future `X_fut` (or `X_fut.result()` when embedded) |
+| `{{tasks.X.outputs.parameters.NAME}}`          | loud helper that **raises until you map it** (`A2P-105`)    |
 | `{{item}}` / `{{item.key}}`                    | the mapped loop variable                                    |
-| `retryStrategy.limit`                          | `@task(retries=N)`                                          |
-| `CronWorkflow.schedule` / `.timezone`          | `flow.serve(cron=..., timezone=...)`                        |
+| `retryStrategy` (limit + backoff)              | `@task(retries=, retry_delay_seconds=/exponential_backoff)` |
+| `activeDeadlineSeconds`                        | `timeout_seconds=` on the task/flow                         |
+| `onExit`                                       | `on_completion=` + `on_failure=` state hooks                |
+| `synchronization` (mutex/semaphore)            | `with concurrency(...)` guard (+ limit-creation guidance)   |
+| `memoize`                                      | `cache_policy=INPUTS` + `cache_expiration=`                 |
+| `CronWorkflow.schedule(s)` / `.timezone` / `.suspend` | `flow.serve(cron=...)` / schedules in `prefect.yaml` (paused if suspended) |
 
 ### Example
 
@@ -241,9 +254,16 @@ Output (see `examples/prefect/dag-diamond_flow.py`):
 ```python
 @flow(name="diamond")
 def diamond():
+    """Argo dag template 'diamond'."""
+    # A -> template 'echo'
     a_fut = echo.submit(message=f"{WORKFLOW_PARAMETERS['greeting']} from A")
-    b_fut = echo.submit(message=f"B saw: {a_fut.result()}", wait_for=[_f for _f in [a_fut] if _f is not None])
+    # B -> template 'echo'
+    b_fut = echo.submit(
+        message=f"B saw: {a_fut.result()}", wait_for=[_f for _f in [a_fut] if _f is not None]
+    )
+    # C -> template 'echo'
     c_fut = echo.submit(message="C", wait_for=[_f for _f in [a_fut] if _f is not None])
+    # D -> template 'echo'
     d_fut = echo.submit(message="D", wait_for=[_f for _f in [b_fut, c_fut] if _f is not None])
     return None
 ```
@@ -252,18 +272,29 @@ Committed reference conversions live in [`examples/prefect/`](examples/prefect/)
 
 ## What needs manual review
 
-The tool is honest about its limits. It emits warnings (collected in the
-generated file's docstring) for things that need a human:
+The tool is honest about its limits. Every follow-up item carries a stable
+`TODO(A2P-###)` code in the generated code, is collected in the file's
+docstring, and lands in `MIGRATION_REPORT.md` with a `file:line` anchor.
+The recurring ones:
 
-- **Artifacts** (`inputs/outputs.artifacts`): Prefect uses results/storage blocks
-  instead of Argo's artifact repository — wire these up yourself.
-- **Named output parameters** (`outputs.parameters` with `valueFrom`): generated
-  tasks return their stdout; references to named outputs resolve to that stdout.
-- **`when` conditions**: translated best-effort and marked with a `# TODO`. Regex
-  (`=~`) conditions are left for you to port.
+- **Artifacts** (`inputs/outputs.artifacts`): storage is identified
+  (s3/gcs/azure/http/git/…) and each artifact gets an anchored TODO with its
+  location, but fetching/publishing is yours to wire — Prefect uses
+  results/storage blocks instead of Argo's artifact repository.
+- **Named output parameters** (`outputs.parameters` with `valueFrom`): Argo
+  read these from files inside the container; only stdout is captured. A
+  reference to one generates a helper that **raises with mapping guidance**
+  until you port it — a loud failure instead of silently-wrong data.
+- **`when` conditions**: translated (including common `{{= expr-lang }}`) and
+  marked for review. Anything untranslatable — regex `=~`, unknown functions —
+  becomes an explicit `if False` with a warning, never invalid code.
+- **Secret/configmap env vars** (`valueFrom`): flagged with a placeholder;
+  wire up Prefect Secret blocks or worker env yourself.
 - **Volumes / `volumeClaimTemplates`**: configure on your Prefect work pool.
-- **`templateRef` across files**, `containerSet`, `data` templates: emitted as
-  stubs that raise `NotImplementedError`.
+- **`templateRef` to a manifest *outside* the conversion input**,
+  `containerSet`, `data`, and plugin templates: emitted as stubs that raise
+  `NotImplementedError`. (`templateRef` *within* the input resolves via the
+  shared module — include the whole fleet in one run.)
 
 Workflow parameters are shared through a module-level `WORKFLOW_PARAMETERS` dict
 that the entry-point flow updates at runtime; this is correct for in-process task
@@ -276,15 +307,21 @@ parameters explicitly instead.
 src/argo2prefect/
   models.py        # typed intermediate representation (IR)
   parser.py        # Argo YAML  -> IR
-  expressions.py   # {{...}} expression translation
+  project.py       # multi-manifest loading + cross-file templateRef linking
+  expressions.py   # {{...}} / {{= expr-lang }} expression translation
   naming.py        # Argo names -> valid Python identifiers
-  generator.py     # IR -> Prefect 3 Python source
+  generator.py     # IR -> Prefect 3 Python source (per-runtime backends)
+  assess.py        # fleet grading + assessment / migration reports
+  todos.py         # stable TODO(A2P-###) code catalogue
   deploy.py        # deployment plans -> Prefect Cloud prefect.yaml + DEPLOY.md
-  cli.py           # `argo2prefect` command-line interface
+  cli.py           # assess / convert / verify / inspect commands
 examples/
   argo/            # sample Argo manifests
-  prefect/         # committed reference conversions
-tests/             # parser, expression, generator, CLI and end-to-end tests
+  prefect/         # committed reference conversions (regenerated from the tool)
+tests/
+  corpus/          # 200+ real-world manifests (upstream argo-workflows examples)
+  golden/          # pinned generator output for the curated examples
+  ...              # parser, expression, generator, CLI and end-to-end tests
 ```
 
 ## Development

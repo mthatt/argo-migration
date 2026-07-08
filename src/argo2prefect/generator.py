@@ -50,8 +50,9 @@ class GeneratorOptions:
 
     * ``"shell"``      - run the command on the Prefect worker host.
     * ``"docker"``     - run it via ``docker run`` (faithful to the image).
-    * ``"kubernetes"`` - submit a Kubernetes ``Job`` via ``kubectl`` (closest to
-      Argo; requires ``kubectl`` + cluster access on the worker).
+    * ``"kubernetes"`` - submit a Kubernetes ``Job`` via the official client
+      (closest to Argo; needs kubeconfig or in-cluster credentials on the
+      worker; the Job is polled to completion and always cleaned up).
 
     ``script_metadata`` embeds a PEP 723 inline-metadata block so the generated
     file is self-bootstrapping with ``uv run flow.py`` (no manual venv/install).
