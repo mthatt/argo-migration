@@ -25,8 +25,8 @@ The lowest-friction way is [`uv`](https://docs.astral.sh/uv/) — no manual venv
 and it bootstraps Python for you:
 
 ```bash
-# Run it without installing anything (recommended). Once published to PyPI:
-uvx argo2prefect convert ./argo-manifests -o ./prefect_flows
+# Run it without installing anything (recommended):
+uvx argo2prefect assess ./argo-manifests
 
 # Or install it as a persistent CLI tool:
 uv tool install argo2prefect
@@ -46,7 +46,7 @@ uvx --from . argo2prefect --help        # run straight from a checkout
 pip install -e ".[dev,generated]"       # editable install + test/runtime deps
 ```
 
-Requires Python 3.9+.
+Requires Python 3.10+.
 
 ## The migration journey
 
